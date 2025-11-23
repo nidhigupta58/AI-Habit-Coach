@@ -44,29 +44,42 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       try {
         setIsModelLoading(true);
         setStatusMessage('Loading AI Model...');
+        console.log('[Face Detection] Starting model load...');
         
         try {
             await tf.setBackend('webgl');
             await tf.ready();
-            console.log('TensorFlow Backend:', tf.getBackend());
+            console.log('[Face Detection] TensorFlow Backend:', tf.getBackend());
         } catch (e) {
-            console.warn('WebGL backend failed, falling back to cpu', e);
+            console.warn('[Face Detection] WebGL backend failed, falling back to cpu', e);
+            try {
+                await tf.setBackend('cpu');
+                await tf.ready();
+                console.log('[Face Detection] Using CPU backend');
+            } catch (cpuError) {
+                console.error('[Face Detection] CPU backend also failed', cpuError);
+            }
         }
 
         const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Model load timeout')), 20000)
+            setTimeout(() => reject(new Error('Model load timeout')), 30000)
         );
         
         await Promise.race([
             (async () => {
+                console.log('[Face Detection] Creating MediaPipeFaceMesh detector...');
                 const loadedModel = await faceLandmarksDetection.createDetector(
                   faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
                   { 
                     runtime: 'tfjs', 
-                    refineLandmarks: false,
-                    maxFaces: 1
+                    refineLandmarks: true,
+                    maxFaces: 1,
+                    // More sensitive detection
+                    detectorModelUrl: undefined,
+                    landmarkModelUrl: undefined
                   }
                 );
+                console.log('[Face Detection] Model loaded successfully');
                 setModel(loadedModel);
             })(),
             timeoutPromise
@@ -75,7 +88,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         setIsModelLoading(false);
         setStatusMessage('AI Ready');
       } catch (err) {
-        console.error('Failed to load model', err);
+        console.error('[Face Detection] Failed to load model', err);
         setIsModelLoading(false);
         setStatusMessage('Model Load Failed');
       }
@@ -140,11 +153,10 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     const isStreamingNow = isStreamingRef.current;
     const isDetectingNow = isDetectingRef.current;
 
+    console.log('[Face Detection] detectFrame called - isDetecting:', isDetectingNow, 'isStreaming:', isStreamingNow);
+
     if (!currentModel || !videoRef.current || !canvasRef.current) {
-        // If model is missing but we are streaming, keep looping to check again later?
-        // No, if model is missing, we can't do anything.
-        // But if we return here, the loop dies.
-        // We should only loop if we are streaming.
+        console.log('[Face Detection] Missing required refs - model:', !!currentModel, 'video:', !!videoRef.current, 'canvas:', !!canvasRef.current);
         if (isStreamingNow) {
              requestRef.current = requestAnimationFrame(detectFrame);
         }
@@ -155,7 +167,9 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     const canvas = canvasRef.current;
     
     if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
-      if (Date.now() - videoReadyStartTimeRef.current > 5000 && isDetectingNow) {
+      console.log('[Face Detection] Video not ready - readyState:', video.readyState, 'width:', video.videoWidth, 'height:', video.videoHeight);
+      if (Date.now() - videoReadyStartTimeRef.current > 3000 && isDetectingNow) {
+          console.log('[Face Detection] Waiting for camera stream... readyState:', video.readyState);
           setStatusMessage('Waiting for camera stream...');
       }
       if (isStreamingNow) {
@@ -177,19 +191,22 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     }
 
     const now = Date.now();
-    if (now - lastDetectionTimeRef.current > 100) {
+    // Reduced frequency from 100ms to 300ms to give model more time per detection
+    if (now - lastDetectionTimeRef.current > 300) {
         lastDetectionTimeRef.current = now;
         
         if (isDetectingNow) {
             setStatusMessage('Scanning face...');
             try {
+              console.log('[Face Detection] Attempting to detect faces...');
               const facesPromise = currentModel.estimateFaces(video);
               const timeoutPromise = new Promise<faceLandmarksDetection.Face[]>((_, reject) => 
-                  setTimeout(() => reject(new Error('Detection timeout')), 2000)
+                  setTimeout(() => reject(new Error('Detection timeout')), 3000)
               );
 
               const faces = await Promise.race([facesPromise, timeoutPromise]);
               
+              console.log('[Face Detection] Detected faces:', faces.length);
               setDebugInfo(`Backend: ${tf.getBackend()} | Faces: ${faces.length}`);
 
               if (ctx) {
@@ -203,29 +220,37 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
               }
 
               if (faces.length > 0) {
+                console.log('[Face Detection] Face found! Analyzing mood...');
                 setStatusMessage('Analyzing expression...');
                 analyzeMood(faces[0].keypoints);
                 setNoFaceDetected(false);
-                return; // Stop loop if found (analyzeMood will stop camera)
+                // Don't return here - let analyzeMood handle stopping
               } else {
-                  if (now - detectionStartTimeRef.current > 5000) {
+                  // Increased timeout to 10 seconds for better performance in poor lighting
+                  if (now - detectionStartTimeRef.current > 10000) {
+                      console.log('[Face Detection] No face detected for 10+ seconds');
                       setNoFaceDetected(true);
-                      setStatusMessage('No face detected');
+                      setStatusMessage('No face detected - adjust lighting or position');
                   }
               }
             } catch (err) {
-              console.error('Detection error:', err);
+              console.error('[Face Detection] Detection error:', err);
               setDebugInfo(`Error: ${err instanceof Error ? err.message : String(err)}`);
             }
+        } else {
+            console.log('[Face Detection] isDetectingNow is false, skipping detection');
         }
     }
 
     if (isStreamingNow || isDetectingNow) {
         requestRef.current = requestAnimationFrame(detectFrame);
+    } else {
+        console.log('[Face Detection] Stopping detection loop - not streaming or detecting');
     }
   };
 
   const analyzeMood = (keypoints: faceLandmarksDetection.Keypoint[]) => {
+    console.log('[Face Detection] Analyzing mood with', keypoints.length, 'keypoints');
     const getPoint = (index: number) => keypoints[index];
     const distance = (p1: any, p2: any) => Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
 
@@ -251,6 +276,8 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     const browDistance = distance(getPoint(55), getPoint(285));
     const normalizedBrowDist = browDistance / faceWidth;
 
+    console.log('[Face Detection] Metrics - SmileRatio:', smileRatio.toFixed(2), '| EAR:', avgEAR.toFixed(2), '| Brow:', normalizedBrowDist.toFixed(2));
+
     let mood = 'Focused';
 
     if (smileRatio > 0.45) { 
@@ -261,6 +288,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         // mood = 'Stressed'; 
     }
 
+    console.log('[Face Detection] Detected mood:', mood);
     setDebugInfo(`Backend: ${tf.getBackend()} | Smile: ${smileRatio.toFixed(2)} | EAR: ${avgEAR.toFixed(2)}`);
 
     setDetectedMood(mood);
@@ -274,6 +302,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         source: 'webcam'
     });
 
+    console.log('[Face Detection] Mood entry added, stopping camera in 2s');
     setTimeout(() => {
         stopCamera();
         if (onMoodDetected) onMoodDetected();
@@ -281,9 +310,11 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
   };
 
   const startCamera = async () => {
+    console.log('[Face Detection] startCamera called');
     setPermissionDenied(false);
     videoReadyStartTimeRef.current = Date.now();
     try {
+      console.log('[Face Detection] Requesting camera access...');
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { 
             width: { ideal: 640 },
@@ -291,17 +322,22 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             facingMode: 'user'
         } 
       });
+      console.log('[Face Detection] Camera access granted');
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
+        console.log('[Face Detection] Video playing');
         setIsStreaming(true);
         // Start the loop
         if (!requestRef.current) {
+             console.log('[Face Detection] Starting detection loop');
              requestRef.current = requestAnimationFrame(detectFrame);
+        } else {
+             console.log('[Face Detection] Detection loop already running');
         }
       }
     } catch (err: any) {
-      console.error('Error accessing webcam:', err);
+      console.error('[Face Detection] Error accessing webcam:', err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setPermissionDenied(true);
       } else {
@@ -332,6 +368,8 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
   };
 
   const handleDetectClick = () => {
+      console.log('[Face Detection] Detect button clicked');
+      console.log('[Face Detection] Current state - isStreaming:', isStreaming, 'model:', !!model, 'requestRef:', requestRef.current);
       setIsDetecting(true);
       setNoFaceDetected(false);
       setStatusMessage('Initializing detection...');
@@ -339,14 +377,25 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       
       setTimeout(() => {
           if (isDetectingRef.current) { 
+             console.log('[Face Detection] Detection timed out after 30s');
              setIsDetecting(false);
              setNoFaceDetected(false);
              setStatusMessage('Detection timed out');
           }
-      }, 15000);
+      }, 30000);
 
       if (!isStreaming) {
+          console.log('[Face Detection] Camera not streaming, starting camera...');
           startCamera();
+      } else {
+          console.log('[Face Detection] Camera already streaming');
+          // Ensure detection loop is running
+          if (!requestRef.current && model) {
+              console.log('[Face Detection] Detection loop not running, starting it now');
+              requestRef.current = requestAnimationFrame(detectFrame);
+          } else {
+              console.log('[Face Detection] Detection loop already active or model not ready');
+          }
       }
   };
 
