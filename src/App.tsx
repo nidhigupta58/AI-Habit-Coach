@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { AppProvider } from './context/AppContext';
+import { AppProvider, useApp } from './context/AppContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { HabitList } from './components/HabitList';
 import { AddHabitModal } from './components/AddHabitModal';
@@ -10,14 +10,19 @@ import { AnalyticsChart } from './components/AnalyticsChart';
 import { StatsCard } from './components/StatsCard';
 import { SettingsModal } from './components/SettingsModal';
 import { Login } from './components/Login';
+import { generateCoaching } from './services/aiService';
 import { Activity, Brain, LayoutDashboard, BarChart2, Settings, LogOut, ChevronDown, Moon, Sun, Plus, Sparkles } from 'lucide-react';
 
 function AppContent() {
   const { user, logout, sendVerificationEmail } = useAuth();
+  const { habits, moodHistory, apiKey } = useApp(); // Get habits/mood from context
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'habits' | 'mood' | 'coach' | 'stats'>('habits');
-  const [showUserMenu, setShowUserMenu] = useState(false);  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [dailyFocus, setDailyFocus] = useState<string | null>(null);
+
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null;
     if (savedTheme) {
       document.documentElement.setAttribute('data-theme', savedTheme);
@@ -31,6 +36,25 @@ function AppContent() {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
   }, [theme]);
+
+  // Fetch Daily Focus
+  useEffect(() => {
+    const fetchFocus = async () => {
+      try {
+        // We only need a simple focus message for the dashboard
+        // Using the existing service but we could optimize this to be lighter if needed
+        const result = await generateCoaching(habits, moodHistory, apiKey);
+        setDailyFocus(result.focus);
+      } catch (error) {
+        console.error("Failed to fetch daily focus", error);
+      }
+    };
+    
+    if (habits.length > 0 || moodHistory.length > 0) {
+      fetchFocus();
+    }
+  }, [habits, moodHistory, apiKey]);
+
   const toggleTheme = () => {
     const newTheme = theme === 'dark' ? 'light' : 'dark';
     setTheme(newTheme);
@@ -213,6 +237,45 @@ function AppContent() {
                   Add Habit
                 </button>
               </div>
+
+              {/* Daily Focus Card */}
+              {dailyFocus && (
+                <div className="glass-card animate-slide-up" style={{ 
+                  marginBottom: '2rem',
+                  background: 'linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(236, 72, 153, 0.05))',
+                  borderLeft: '4px solid var(--accent)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '1rem' }}>
+                    <div style={{ 
+                      padding: '0.5rem', 
+                      borderRadius: '0.5rem', 
+                      backgroundColor: 'rgba(139, 92, 246, 0.2)', 
+                      color: 'var(--accent)',
+                      marginTop: '0.25rem'
+                    }}>
+                      <Sparkles size={20} />
+                    </div>
+                    <div>
+                      <h3 style={{ 
+                        fontSize: '1rem', 
+                        fontWeight: 600, 
+                        marginBottom: '0.5rem',
+                        color: 'var(--text-primary)'
+                      }}>
+                        Daily Focus
+                      </h3>
+                      <p style={{ 
+                        fontSize: '1rem', 
+                        lineHeight: 1.5,
+                        color: 'var(--text-secondary)'
+                      }}>
+                        {dailyFocus}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <HabitList onAddClick={() => setIsAddModalOpen(true)} />
             </div>
           )}
