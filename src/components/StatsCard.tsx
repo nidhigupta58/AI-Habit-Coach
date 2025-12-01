@@ -3,7 +3,7 @@ import { Flame, Trophy, Calendar, TrendingUp } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 export const StatsCard: React.FC = () => {
-  const { habits } = useApp();
+  const { habits, moodHistory } = useApp();
 
   const totalHabits = habits.length;
   
@@ -35,14 +35,58 @@ export const StatsCard: React.FC = () => {
   const completedToday = habits.filter(h => h.completedDates.includes(today)).length;
   const todayCompletion = totalHabits > 0 ? Math.round((completedToday / totalHabits) * 100) : 0;
 
+  // Calculate Habit Score (Weighted: 40% Consistency, 40% Today, 20% Streak)
+  // Cap streak bonus at 100 (e.g., 20 day streak = 100)
+  const streakScore = Math.min(bestStreak * 5, 100);
+  const habitScore = Math.round((consistency * 0.4) + (todayCompletion * 0.4) + (streakScore * 0.2));
+
+  let scoreGrade = 'C';
+  if (habitScore >= 90) scoreGrade = 'A+';
+  else if (habitScore >= 80) scoreGrade = 'A';
+  else if (habitScore >= 70) scoreGrade = 'B';
+  else if (habitScore >= 60) scoreGrade = 'C';
+  else scoreGrade = 'D';
+
+  // Correlation Insight
+  // Find mood with highest completion rate
+  const moodPerformance: Record<string, { total: number, completed: number }> = {};
+  
+  // Map dates to moods
+  const dateMoodMap: Record<string, string> = {};
+  moodHistory.forEach(m => {
+    dateMoodMap[m.date.split('T')[0]] = m.mood;
+  });
+
+  habits.forEach(h => {
+    h.completedDates.forEach(date => {
+      const mood = dateMoodMap[date];
+      if (mood) {
+        if (!moodPerformance[mood]) moodPerformance[mood] = { total: 0, completed: 0 };
+        moodPerformance[mood].completed++;
+      }
+    });
+  });
+  
+  // Normalize by occurrences of that mood (approximate)
+  // This is a simple correlation for now
+  let bestMood = 'Focused'; // Default
+  let maxPerf = -1;
+
+  Object.entries(moodPerformance).forEach(([mood, data]) => {
+    if (data.completed > maxPerf) {
+      maxPerf = data.completed;
+      bestMood = mood;
+    }
+  });
+
   const stats = [
     {
       icon: Trophy,
-      label: 'Consistency',
-      value: `${consistency}%`,
-      color: 'var(--primary)',
-      bgColor: 'rgba(99, 102, 241, 0.1)',
-      description: 'Last 7 days'
+      label: 'Habit Score',
+      value: scoreGrade,
+      color: 'var(--accent)',
+      bgColor: 'rgba(139, 92, 246, 0.1)',
+      description: `${habitScore}/100 Points`
     },
     {
       icon: Flame,
@@ -53,20 +97,20 @@ export const StatsCard: React.FC = () => {
       description: 'Days in a row'
     },
     {
-      icon: Calendar,
-      label: 'Active Habits',
-      value: totalHabits,
+      icon: TrendingUp,
+      label: 'Consistency',
+      value: `${consistency}%`,
       color: 'var(--success)',
       bgColor: 'rgba(16, 185, 129, 0.1)',
-      description: 'Total tracking'
+      description: 'Last 7 days'
     },
     {
-      icon: TrendingUp,
-      label: 'Today',
-      value: `${todayCompletion}%`,
+      icon: Calendar,
+      label: 'Best Mood',
+      value: bestMood,
       color: 'var(--secondary)',
       bgColor: 'rgba(236, 72, 153, 0.1)',
-      description: `${completedToday}/${totalHabits} done`
+      description: 'For productivity'
     }
   ];
 
@@ -81,7 +125,7 @@ export const StatsCard: React.FC = () => {
         const Icon = stat.icon;
         return (
           <div
-    key={index}
+            key={index}
             className="glass-card animate-slide-up"
             style={{
               textAlign: 'center',
