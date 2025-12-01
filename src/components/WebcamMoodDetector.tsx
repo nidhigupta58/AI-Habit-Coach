@@ -40,39 +40,17 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         await tf.ready();
         console.log('[FaceDetection] TensorFlow ready with backend:', tf.getBackend());
 
-        // Load the face detection model (v1 API)
-        console.log('[FaceDetection] Loading MediaPipe FaceMesh (v1)...');
-        console.log('[FaceDetection] Available exports:', Object.keys(faceLandmarksDetection));
+        // Load the face detection model
+        console.log('[FaceDetection] Loading MediaPipe FaceMesh...');
         
-        // Try different initialization patterns for v1.0.6
-        let model;
-        // @ts-expect-error - load doesn't exist in types but may exist at runtime
-        if (typeof faceLandmarksDetection.load === 'function') {
-          // @ts-expect-error - v1 API
-          model = await faceLandmarksDetection.load('mediapipe-facemesh', { maxFaces: 1 });
-        // @ts-expect-error - exploring runtime API
-        } else if (faceLandmarksDetection.FaceMesh) {
-          // Instantiate FaceMesh class directly
-          // @ts-expect-error - v1 API
-          model = new faceLandmarksDetection.FaceMesh({ maxFaces: 1 });
-          await model.initialize?.();
-        } else {
-          // Try default export or createDetector
-          // @ts-expect-error - trying different API
-          const createFn = faceLandmarksDetection.createDetector || faceLandmarksDetection.default;
-          if (createFn) {
-            model = await createFn(
-              faceLandmarksDetection.SupportedModels?.MediaPipeFaceMesh || 'MediaPipeFaceMesh',
-              {
-                runtime: 'tfjs' as never,
-                maxFaces: 1,
-                refineLandmarks: false
-              }
-            );
-          } else {
-            throw new Error('Could not find initialization method in faceLandmarksDetection package');
+        const model = await faceLandmarksDetection.createDetector(
+          faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
+          {
+            runtime: 'tfjs',
+            maxFaces: 1,
+            refineLandmarks: false
           }
-        }
+        );
 
         if (mounted) {
           setModel(model);
@@ -234,13 +212,8 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     }
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const faces = await (model as never as { estimateFaces: (options: { input: HTMLVideoElement; returnTensors: boolean; flipHorizontal: boolean; predictIrises: boolean }) => Promise<unknown[]> }).estimateFaces({
-        input: video,
-        returnTensors: false,
-        flipHorizontal: false,
-        predictIrises: false
-      });
+      // Estimate faces
+      const faces = await model.estimateFaces(video);
       
       if (faces.length === 0) {
         if (Math.random() < 0.05) console.log('[FaceDetection] No faces detected.');
@@ -255,7 +228,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         if (faces.length > 0) {
           setFaceDetected(true);
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const face = faces[0] as Record<string, unknown>;
+          const face = faces[0] as unknown as Record<string, unknown>;
           
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const keypoints = (face.scaledMesh || face.mesh || face.keypoints) as (Point | number[])[];
@@ -462,6 +435,21 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             Position your face in the frame
           </div>
         )}
+
+        {/* Debug Info Overlay */}
+        <div style={{
+          position: 'absolute',
+          top: '0.5rem',
+          right: '0.5rem',
+          background: 'rgba(0,0,0,0.5)',
+          padding: '0.25rem 0.5rem',
+          borderRadius: '4px',
+          fontSize: '0.7rem',
+          color: 'rgba(255,255,255,0.7)',
+          pointerEvents: 'none'
+        }}>
+          Model: {model ? 'Loaded' : 'Loading...'} | Backend: {tf.getBackend()}
+        </div>
       </div>
 
       <div style={{
