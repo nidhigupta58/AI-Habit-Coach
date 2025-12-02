@@ -197,7 +197,16 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    if (video.readyState < 2) {
+    // Ensure video is ready with actual frame data
+    if (video.readyState < video.HAVE_ENOUGH_DATA) {
+      console.log('[FaceDetection] Waiting for video data...');
+      animationRef.current = requestAnimationFrame(detectLoop);
+      return;
+    }
+
+    // Ensure video has valid dimensions
+    if (!video.videoWidth || !video.videoHeight) {
+      console.log('[FaceDetection] Waiting for video dimensions...');
       animationRef.current = requestAnimationFrame(detectLoop);
       return;
     }
@@ -205,24 +214,27 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
+      console.log('[FaceDetection] Canvas sized:', canvas.width, 'x', canvas.height);
     }
 
     try {
-      // Estimate faces
-      const faces = await model.estimateFaces(video);
-      
-      // DEBUG: Always log for now to see what's happening
-      console.log('[FaceDetection] estimateFaces result:', {
-        facesCount: faces.length,
-        videoReady: video.readyState,
-        videoWidth: video.videoWidth,
-        videoHeight: video.videoHeight
+      // Estimate faces with proper config for video streams
+      const faces = await model.estimateFaces(video, {
+        flipHorizontal: false,
+        staticImageMode: false  // Important for video streams!
       });
-
+      
+      // DEBUG: Log detection results
       if (faces.length === 0) {
-        console.log('[FaceDetection] No faces detected in this frame');
+        if (Math.random() < 0.1) {
+          console.log('[FaceDetection] No faces detected in this frame');
+        }
       } else {
-        console.log('[FaceDetection] ✓ Faces detected:', faces.length, faces);
+        console.log('[FaceDetection] ✓ FACE DETECTED!', {
+          facesCount: faces.length,
+          keypointsCount: faces[0].keypoints?.length || 0,
+          box: faces[0].box
+        });
       }
 
       const ctx = canvas.getContext('2d');
