@@ -4,7 +4,7 @@ import { useApp } from '../context/AppContext';
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgl';
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection';
-import type { Point } from '../types/Point';
+
 
 interface WebcamMoodDetectorProps {
   onMoodDetected?: () => void;
@@ -126,14 +126,10 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
   };
 
   // Analyze mood from face landmarks
-  const analyzeMood = (keypoints: (Point | number[])[]): MoodType => {
-    const getPoint = (index: number): Point => {
-      const p = keypoints[index];
-      if (Array.isArray(p)) return { x: p[0], y: p[1], z: p[2] };
-      return p as Point;
-    };
+  const analyzeMood = (keypoints: { x: number; y: number; z?: number; name?: string }[]): MoodType => {
+    const getPoint = (index: number) => keypoints[index];
 
-    const distance = (p1: Point, p2: Point) => 
+    const distance = (p1: { x: number; y: number }, p2: { x: number; y: number }) => 
       Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
 
     // Calculate facial metrics
@@ -215,10 +211,18 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       // Estimate faces
       const faces = await model.estimateFaces(video);
       
+      // DEBUG: Always log for now to see what's happening
+      console.log('[FaceDetection] estimateFaces result:', {
+        facesCount: faces.length,
+        videoReady: video.readyState,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight
+      });
+
       if (faces.length === 0) {
-        if (Math.random() < 0.05) console.log('[FaceDetection] No faces detected.');
+        console.log('[FaceDetection] No faces detected in this frame');
       } else {
-        console.log('[FaceDetection] Faces detected:', faces.length);
+        console.log('[FaceDetection] ✓ Faces detected:', faces.length, faces);
       }
 
       const ctx = canvas.getContext('2d');
@@ -227,26 +231,25 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
         if (faces.length > 0) {
           setFaceDetected(true);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const face = faces[0] as unknown as Record<string, unknown>;
-          
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const keypoints = (face.scaledMesh || face.mesh || face.keypoints) as (Point | number[])[];
+          const face = faces[0];
+          const keypoints = face.keypoints;
 
-          if (!keypoints) {
+          if (!keypoints || keypoints.length === 0) {
             console.warn('[FaceDetection] No keypoints found in face object:', face);
             animationRef.current = requestAnimationFrame(detectLoop);
             return;
           }
+          
+          console.log('[FaceDetection] Keypoints found:', keypoints.length);
 
           // Draw face mesh
           ctx.fillStyle = '#6366f1';
           ctx.strokeStyle = '#6366f1';
           ctx.lineWidth = 1;
 
-          keypoints.forEach((point: Point | number[]) => {
-            const x = Array.isArray(point) ? point[0] : point.x;
-            const y = Array.isArray(point) ? point[1] : point.y;
+          keypoints.forEach((point) => {
+            const x = point.x;
+            const y = point.y;
             ctx.beginPath();
             ctx.arc(x, y, 1, 0, 2 * Math.PI);
             ctx.fill();
@@ -256,6 +259,15 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
           
           try {
             const mood = analyzeMood(keypoints);
+            
+            // DEBUG: Draw metrics on canvas
+            // We need to recalculate them here or return them from analyzeMood. 
+            // For now, let's just trust the console logs from analyzeMood, 
+            // but we'll add a visual indicator of the detected mood on the canvas too.
+            ctx.font = '20px Arial';
+            ctx.fillStyle = 'white';
+            ctx.fillText(`Mood: ${mood}`, 10, 30);
+            
             setDetectedMood(mood);
             setIsAnalyzing(false);
 
