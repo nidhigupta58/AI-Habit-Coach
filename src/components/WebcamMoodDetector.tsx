@@ -310,7 +310,12 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       console.error('[FaceDetection] Detection error:', err);
     }
 
-    animationRef.current = requestAnimationFrame(detectLoop);
+    // Continue the loop only if still analyzing and no mood has been detected
+    if (isAnalyzing && !detectedMood) {
+      animationRef.current = requestAnimationFrame(detectLoop);
+    } else {
+      console.log('[FaceDetection] Loop stopped. isAnalyzing:', isAnalyzing, 'detectedMood:', detectedMood);
+    }
   };
 
   // Start mood detection
