@@ -6,6 +6,7 @@ import '@tensorflow/tfjs-backend-webgl';
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection';
 
 
+
 interface WebcamMoodDetectorProps {
   onMoodDetected?: () => void;
 }
@@ -43,13 +44,15 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         // Load the face detection model
         console.log('[FaceDetection] Loading MediaPipe FaceMesh...');
         
+        const detectorConfig = {
+          runtime: 'tfjs' as const,
+          maxFaces: 1,
+          refineLandmarks: false,
+        };
+        
         const model = await faceLandmarksDetection.createDetector(
           faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
-          {
-            runtime: 'tfjs',
-            maxFaces: 1,
-            refineLandmarks: false
-          }
+          detectorConfig
         );
 
         if (mounted) {
@@ -127,7 +130,11 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
   // Analyze mood from face landmarks
   const analyzeMood = (keypoints: { x: number; y: number; z?: number; name?: string }[]): MoodType => {
-    const getPoint = (index: number) => keypoints[index];
+    const getPoint = (index: number) => {
+      const point = keypoints[index];
+      if (!point) throw new Error(`Keypoint ${index} not found`);
+      return point;
+    };
 
     const distance = (p1: { x: number; y: number }, p2: { x: number; y: number }) => 
       Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
@@ -190,7 +197,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
   // Main detection loop
   const detectLoop = async () => {
-    if (!model || !videoRef.current || !canvasRef.current || !isAnalyzing) {
+    if (!model || !videoRef.current || !canvasRef.current || !isAnalyzing || !streamRef.current) {
       return;
     }
 
@@ -199,43 +206,28 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
     // Ensure video is ready with actual frame data
     if (video.readyState < video.HAVE_ENOUGH_DATA) {
-      console.log('[FaceDetection] Waiting for video data...');
-      animationRef.current = requestAnimationFrame(detectLoop);
+      console.log('[FaceDetection] detectLoop: Video not ready yet (readyState:', video.readyState, '). Waiting for enough data...');
+      animationRef.current = requestAnimationFrame(() => detectLoop());
       return;
     }
 
-    // Ensure video has valid dimensions
     if (!video.videoWidth || !video.videoHeight) {
-      console.log('[FaceDetection] Waiting for video dimensions...');
-      animationRef.current = requestAnimationFrame(detectLoop);
+      console.log('[FaceDetection] detectLoop: Video dimensions not available yet (videoWidth:', video.videoWidth, ', videoHeight:', video.videoHeight, '). Waiting...');
+      animationRef.current = requestAnimationFrame(() => detectLoop());
       return;
     }
 
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
-      console.log('[FaceDetection] Canvas sized:', canvas.width, 'x', canvas.height);
+      console.log(`[FaceDetection] detectLoop: Canvas resized to ${canvas.width}x${canvas.height} to match video dimensions.`);
     }
 
     try {
-      // Estimate faces with proper config for video streams
-      const faces = await model.estimateFaces(video, {
-        flipHorizontal: false,
-        staticImageMode: false  // Important for video streams!
-      });
+      console.log('[FaceDetection] detectLoop: Attempting to estimate faces...');
+      const faces = await model.estimateFaces(video);
       
-      // DEBUG: Log detection results
-      if (faces.length === 0) {
-        if (Math.random() < 0.1) {
-          console.log('[FaceDetection] No faces detected in this frame');
-        }
-      } else {
-        console.log('[FaceDetection] ✓ FACE DETECTED!', {
-          facesCount: faces.length,
-          keypointsCount: faces[0].keypoints?.length || 0,
-          box: faces[0].box
-        });
-      }
+      console.log(`[FaceDetection] detectLoop: estimateFaces returned ${faces.length} face(s).`);
 
       const ctx = canvas.getContext('2d');
       if (ctx) {
@@ -247,12 +239,12 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
           const keypoints = face.keypoints;
 
           if (!keypoints || keypoints.length === 0) {
-            console.warn('[FaceDetection] No keypoints found in face object:', face);
-            animationRef.current = requestAnimationFrame(detectLoop);
+            console.warn('[FaceDetection] detectLoop: No keypoints found in detected face object. Face object:', face);
+            animationRef.current = requestAnimationFrame(() => detectLoop());
             return;
           }
           
-          console.log('[FaceDetection] Keypoints found:', keypoints.length);
+          console.log(`[FaceDetection] detectLoop: Keypoints found for face: ${keypoints.length}`);
 
           // Draw face mesh
           ctx.fillStyle = '#6366f1';
@@ -266,8 +258,6 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             ctx.arc(x, y, 1, 0, 2 * Math.PI);
             ctx.fill();
           });
-
-          console.log('[FaceDetection] Face detected! Analyzing mood...');
           
           try {
             const mood = analyzeMood(keypoints);
@@ -289,8 +279,6 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
               source: 'webcam'
             });
 
-            console.log('[FaceDetection] Mood detected:', mood);
-
             setTimeout(() => {
               stopCamera();
               if (onMoodDetected) {
@@ -308,13 +296,12 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       }
     } catch (err) {
       console.error('[FaceDetection] Detection error:', err);
+      setError('An error occurred during face detection.');
     }
 
     // Continue the loop only if still analyzing and no mood has been detected
     if (isAnalyzing && !detectedMood) {
-      animationRef.current = requestAnimationFrame(detectLoop);
-    } else {
-      console.log('[FaceDetection] Loop stopped. isAnalyzing:', isAnalyzing, 'detectedMood:', detectedMood);
+      animationRef.current = requestAnimationFrame(() => detectLoop());
     }
   };
 
