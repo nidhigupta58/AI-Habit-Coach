@@ -5,13 +5,18 @@ import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgl';
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection';
 
-
-
 interface WebcamMoodDetectorProps {
   onMoodDetected?: () => void;
 }
 
 type MoodType = 'Happy' | 'Stressed' | 'Tired' | 'Focused';
+
+interface Keypoint {
+  x: number;
+  y: number;
+  z?: number;
+  name?: string;
+}
 
 export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDetected }) => {
   const { addMoodEntry } = useApp();
@@ -19,14 +24,16 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
   const streamRef = useRef<MediaStream | null>(null);
+  const detectorRef = useRef<faceLandmarksDetection.FaceLandmarksDetector | null>(null);
 
-  const [model, setModel] = useState<faceLandmarksDetection.FaceLandmarksDetector | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [detectedMood, setDetectedMood] = useState<MoodType | null>(null);
   const [error, setError] = useState<string>('');
   const [faceDetected, setFaceDetected] = useState(false);
+  const [detectionCount, setDetectionCount] = useState(0);
+  const [modelLoadProgress, setModelLoadProgress] = useState('Initializing...');
 
   // Load TensorFlow model on mount
   useEffect(() => {
@@ -34,36 +41,79 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
     const loadModel = async () => {
       try {
+        setModelLoadProgress('Initializing TensorFlow...');
         console.log('[FaceDetection] Initializing TensorFlow...');
         
-        // Set backend
-        await tf.setBackend('webgl');
-        await tf.ready();
-        console.log('[FaceDetection] TensorFlow ready with backend:', tf.getBackend());
-
-        // Load the face detection model
-        console.log('[FaceDetection] Loading MediaPipe FaceMesh...');
-        
-        const detectorConfig = {
-          runtime: 'tfjs' as const,
-          maxFaces: 1,
-          refineLandmarks: false,
-        };
-        
-        const model = await faceLandmarksDetection.createDetector(
-          faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
-          detectorConfig
-        );
-
-        if (mounted) {
-          setModel(model);
-          setIsLoading(false);
-          console.log('[FaceDetection] Model loaded successfully');
+        // Try to set backend, fallback to cpu if webgl fails
+        try {
+          await tf.setBackend('webgl');
+          await tf.ready();
+          console.log('[FaceDetection] TensorFlow ready with backend:', tf.getBackend());
+        } catch (backendError) {
+          console.warn('[FaceDetection] WebGL backend failed, trying CPU...', backendError);
+          await tf.setBackend('cpu');
+          await tf.ready();
+          console.log('[FaceDetection] TensorFlow ready with backend:', tf.getBackend());
         }
-      } catch (err) {
-        console.error('[FaceDetection] Error loading model:', err);
+
+        setModelLoadProgress('Loading face detection model...');
+        console.log('[FaceDetection] Loading MediaPipe FaceMesh with TensorFlow.js runtime...');
+        
+        // Try TensorFlow.js runtime first (more reliable for web)
+        try {
+          const tfjsConfig: faceLandmarksDetection.MediaPipeFaceMeshTfjsModelConfig = {
+            runtime: 'tfjs',
+            maxFaces: 1,
+            refineLandmarks: true,
+          };
+          
+          const detector = await faceLandmarksDetection.createDetector(
+            faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
+            tfjsConfig
+          );
+
+          if (mounted) {
+            detectorRef.current = detector;
+            setIsLoading(false);
+            setModelLoadProgress('Model loaded successfully!');
+            console.log('[FaceDetection] Model loaded successfully with TensorFlow.js runtime');
+          }
+        } catch (tfjsErr: any) {
+          console.warn('[FaceDetection] TensorFlow.js runtime failed, trying MediaPipe runtime...', tfjsErr);
+          
+          // Fallback to MediaPipe runtime
+          try {
+            setModelLoadProgress('Trying MediaPipe runtime...');
+            const mediapipeConfig: faceLandmarksDetection.MediaPipeFaceMeshMediaPipeModelConfig = {
+              runtime: 'mediapipe',
+              solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh',
+              maxFaces: 1,
+              refineLandmarks: true,
+            };
+            
+            const detector = await faceLandmarksDetection.createDetector(
+              faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh,
+              mediapipeConfig
+            );
+            
+            if (mounted) {
+              detectorRef.current = detector;
+              setIsLoading(false);
+              setModelLoadProgress('Model loaded successfully!');
+              console.log('[FaceDetection] Model loaded with MediaPipe runtime');
+            }
+          } catch (mediapipeErr: any) {
+            console.error('[FaceDetection] Both runtimes failed:', mediapipeErr);
+            if (mounted) {
+              setError(`Failed to load AI model: ${mediapipeErr.message || 'Unknown error'}. Please refresh the page.`);
+              setIsLoading(false);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.error('[FaceDetection] Unexpected error loading model:', err);
         if (mounted) {
-          setError('Failed to load AI model. Please refresh the page.');
+          setError(`Failed to load AI model: ${err.message || 'Unknown error'}. Please refresh the page.`);
           setIsLoading(false);
         }
       }
@@ -73,6 +123,9 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
     return () => {
       mounted = false;
+      if (detectorRef.current) {
+        detectorRef.current.dispose();
+      }
     };
   }, []);
 
@@ -80,13 +133,17 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
   const startCamera = async () => {
     try {
       setError('');
+      setDetectedMood(null);
+      setFaceDetected(false);
+      setDetectionCount(0);
       console.log('[FaceDetection] Requesting camera access...');
       
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          facingMode: 'user'
+          width: { ideal: 640, min: 320 },
+          height: { ideal: 480, min: 240 },
+          facingMode: 'user',
+          frameRate: { ideal: 30, min: 15 }
         }
       });
 
@@ -97,9 +154,15 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         setIsCameraActive(true);
         console.log('[FaceDetection] Camera started successfully');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('[FaceDetection] Camera error:', err);
-      setError('Camera access denied. Please allow camera permissions.');
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setError('Camera access denied. Please allow camera permissions in your browser settings.');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setError('No camera found. Please connect a camera and try again.');
+      } else {
+        setError(`Camera error: ${err.message || 'Unknown error'}`);
+      }
     }
   };
 
@@ -128,175 +191,274 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     }
   };
 
-  // Analyze mood from face landmarks
-  const analyzeMood = (keypoints: { x: number; y: number; z?: number; name?: string }[]): MoodType => {
-    const getPoint = (index: number) => {
-      const point = keypoints[index];
-      if (!point) throw new Error(`Keypoint ${index} not found`);
-      return point;
-    };
-
-    const distance = (p1: { x: number; y: number }, p2: { x: number; y: number }) => 
-      Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
-
-    // Calculate facial metrics
-    const mouthLeft = getPoint(61);
-    const mouthRight = getPoint(291);
-    const mouthTop = getPoint(13);
-    const mouthBottom = getPoint(14);
-    
-    const mouthWidth = distance(mouthLeft, mouthRight);
-    const mouthHeight = distance(mouthTop, mouthBottom);
-    const faceWidth = distance(getPoint(234), getPoint(454));
-    
-    const smileRatio = mouthWidth / faceWidth;
-    const mouthOpenRatio = mouthHeight / mouthWidth;
-
-    // Eye aspect ratio (for tiredness)
-    const leftEyeTop = getPoint(159);
-    const leftEyeBottom = getPoint(145);
-    const leftEyeWidth = distance(getPoint(33), getPoint(133));
-    const leftEAR = distance(leftEyeTop, leftEyeBottom) / leftEyeWidth;
-
-    const rightEyeTop = getPoint(386);
-    const rightEyeBottom = getPoint(374);
-    const rightEyeWidth = distance(getPoint(362), getPoint(263));
-    const rightEAR = distance(rightEyeTop, rightEyeBottom) / rightEyeWidth;
-
-    const avgEAR = (leftEAR + rightEAR) / 2;
-
-    // Eyebrow position (for stress)
-    const leftBrow = getPoint(70);
-    const eyeLeft = getPoint(33);
-    const eyeRight = getPoint(133);
-    const leftEyeCenter = {
-      x: (eyeLeft.x + eyeRight.x) / 2,
-      y: (eyeLeft.y + eyeRight.y) / 2
-    };
-
-    const browDist = distance(leftBrow, leftEyeCenter);
-    const browRatio = browDist / faceWidth;
-
-    console.log('[FaceDetection] Metrics:', {
-      smileRatio: smileRatio.toFixed(3),
-      mouthOpen: mouthOpenRatio.toFixed(3),
-      eyeAspect: avgEAR.toFixed(3),
-      browRatio: browRatio.toFixed(3)
-    });
-
-    // Determine mood based on metrics
-    if (smileRatio > 0.46 || mouthOpenRatio > 0.3) {
-      return 'Happy';
-    } else if (avgEAR < 0.18) {
-      return 'Tired';
-    } else if (browRatio < 0.12) {
-      return 'Stressed';
+  // Get keypoint by index with safe fallback
+  const getKeypoint = (keypoints: Keypoint[], index: number): Keypoint | null => {
+    if (index >= 0 && index < keypoints.length) {
+      return keypoints[index];
     }
-    return 'Focused';
+    return null;
+  };
+
+  // Calculate distance between two points
+  const distance = (p1: { x: number; y: number }, p2: { x: number; y: number }): number => {
+    return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+  };
+
+  // Analyze mood from face landmarks using MediaPipe FaceMesh keypoints
+  const analyzeMood = (keypoints: Keypoint[]): MoodType => {
+    if (!keypoints || keypoints.length < 468) {
+      console.warn('[FaceDetection] Insufficient keypoints for mood analysis');
+      return 'Focused';
+    }
+
+    try {
+      // MediaPipe FaceMesh has 468 keypoints
+      // Key facial feature indices for MediaPipe FaceMesh
+      const LEFT_EYE_TOP = 159;
+      const LEFT_EYE_BOTTOM = 145;
+      const LEFT_EYE_LEFT = 33;
+      const LEFT_EYE_RIGHT = 133;
+      
+      const RIGHT_EYE_TOP = 386;
+      const RIGHT_EYE_BOTTOM = 374;
+      const RIGHT_EYE_LEFT = 362;
+      const RIGHT_EYE_RIGHT = 263;
+      
+      const MOUTH_LEFT = 61;
+      const MOUTH_RIGHT = 291;
+      const MOUTH_TOP = 13;
+      const MOUTH_BOTTOM = 14;
+      
+      const FACE_LEFT = 234;
+      const FACE_RIGHT = 454;
+      
+      const LEFT_BROW = 70;
+      const RIGHT_BROW = 300;
+
+      // Get keypoints safely
+      const leftEyeTop = getKeypoint(keypoints, LEFT_EYE_TOP);
+      const leftEyeBottom = getKeypoint(keypoints, LEFT_EYE_BOTTOM);
+      const leftEyeLeft = getKeypoint(keypoints, LEFT_EYE_LEFT);
+      const leftEyeRight = getKeypoint(keypoints, LEFT_EYE_RIGHT);
+      
+      const rightEyeTop = getKeypoint(keypoints, RIGHT_EYE_TOP);
+      const rightEyeBottom = getKeypoint(keypoints, RIGHT_EYE_BOTTOM);
+      const rightEyeLeft = getKeypoint(keypoints, RIGHT_EYE_LEFT);
+      const rightEyeRight = getKeypoint(keypoints, RIGHT_EYE_RIGHT);
+      
+      const mouthLeft = getKeypoint(keypoints, MOUTH_LEFT);
+      const mouthRight = getKeypoint(keypoints, MOUTH_RIGHT);
+      const mouthTop = getKeypoint(keypoints, MOUTH_TOP);
+      const mouthBottom = getKeypoint(keypoints, MOUTH_BOTTOM);
+      
+      const faceLeft = getKeypoint(keypoints, FACE_LEFT);
+      const faceRight = getKeypoint(keypoints, FACE_RIGHT);
+      
+      const leftBrow = getKeypoint(keypoints, LEFT_BROW);
+      const rightBrow = getKeypoint(keypoints, RIGHT_BROW);
+
+      // Validate all required keypoints exist
+      if (!leftEyeTop || !leftEyeBottom || !leftEyeLeft || !leftEyeRight ||
+          !rightEyeTop || !rightEyeBottom || !rightEyeLeft || !rightEyeRight ||
+          !mouthLeft || !mouthRight || !mouthTop || !mouthBottom ||
+          !faceLeft || !faceRight || !leftBrow || !rightBrow) {
+        console.warn('[FaceDetection] Missing required keypoints');
+        return 'Focused';
+      }
+
+      // Calculate facial metrics
+      const mouthWidth = distance(mouthLeft, mouthRight);
+      const mouthHeight = distance(mouthTop, mouthBottom);
+      const faceWidth = distance(faceLeft, faceRight);
+      
+      const smileRatio = mouthWidth / faceWidth;
+      const mouthOpenRatio = mouthHeight / mouthWidth;
+
+      // Eye Aspect Ratio (EAR) - for detecting tiredness/blinking
+      const leftEyeWidth = distance(leftEyeLeft, leftEyeRight);
+      const leftEyeHeight = distance(leftEyeTop, leftEyeBottom);
+      const leftEAR = leftEyeHeight / leftEyeWidth;
+
+      const rightEyeWidth = distance(rightEyeLeft, rightEyeRight);
+      const rightEyeHeight = distance(rightEyeTop, rightEyeBottom);
+      const rightEAR = rightEyeHeight / rightEyeWidth;
+
+      const avgEAR = (leftEAR + rightEAR) / 2;
+
+      // Eyebrow position (for stress/frowning)
+      const leftEyeCenter = {
+        x: (leftEyeLeft.x + leftEyeRight.x) / 2,
+        y: (leftEyeLeft.y + leftEyeRight.y) / 2
+      };
+      const browDist = distance(leftBrow, leftEyeCenter);
+      const browRatio = browDist / faceWidth;
+
+      // Mouth corner position (for smile detection)
+      const mouthCenterY = (mouthTop.y + mouthBottom.y) / 2;
+      const leftMouthCorner = mouthLeft;
+      const rightMouthCorner = mouthRight;
+      const mouthCornerAvgY = (leftMouthCorner.y + rightMouthCorner.y) / 2;
+      const mouthCurvature = mouthCornerAvgY - mouthCenterY; // Positive = smile
+
+      console.log('[FaceDetection] Metrics:', {
+        smileRatio: smileRatio.toFixed(3),
+        mouthOpen: mouthOpenRatio.toFixed(3),
+        mouthCurvature: mouthCurvature.toFixed(3),
+        eyeAspect: avgEAR.toFixed(3),
+        browRatio: browRatio.toFixed(3)
+      });
+
+      // Determine mood based on metrics with improved thresholds
+      // Happy: Smile detected (mouth corners raised, wide mouth)
+      if (smileRatio > 0.40 && mouthCurvature > 0) {
+        return 'Happy';
+      }
+      
+      // Tired: Eyes are closed or very narrow (low EAR)
+      if (avgEAR < 0.20) {
+        return 'Tired';
+      }
+      
+      // Stressed: Eyebrows lowered (frowning), narrow eyes
+      if (browRatio < 0.10 || (browRatio < 0.12 && avgEAR < 0.25)) {
+        return 'Stressed';
+      }
+      
+      // Focused: Neutral expression, eyes open, normal features
+      return 'Focused';
+    } catch (err) {
+      console.error('[FaceDetection] Error in mood analysis:', err);
+      return 'Focused';
+    }
   };
 
   // Main detection loop
   const detectLoop = async () => {
-    if (!model || !videoRef.current || !canvasRef.current || !isAnalyzing || !streamRef.current) {
+    if (!detectorRef.current || !videoRef.current || !canvasRef.current || !isAnalyzing || !streamRef.current) {
       return;
     }
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
+    const detector = detectorRef.current;
 
     // Ensure video is ready with actual frame data
     if (video.readyState < video.HAVE_ENOUGH_DATA) {
-      console.log('[FaceDetection] detectLoop: Video not ready yet (readyState:', video.readyState, '). Waiting for enough data...');
       animationRef.current = requestAnimationFrame(() => detectLoop());
       return;
     }
 
     if (!video.videoWidth || !video.videoHeight) {
-      console.log('[FaceDetection] detectLoop: Video dimensions not available yet (videoWidth:', video.videoWidth, ', videoHeight:', video.videoHeight, '). Waiting...');
       animationRef.current = requestAnimationFrame(() => detectLoop());
       return;
     }
 
+    // Sync canvas dimensions with video
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
-      console.log(`[FaceDetection] detectLoop: Canvas resized to ${canvas.width}x${canvas.height} to match video dimensions.`);
     }
 
     try {
-      console.log('[FaceDetection] detectLoop: Attempting to estimate faces...');
-      const faces = await model.estimateFaces(video);
-      
-      console.log(`[FaceDetection] detectLoop: estimateFaces returned ${faces.length} face(s).`);
+      // Detect faces using the detector
+      const faces = await detector.estimateFaces(video, {
+        flipHorizontal: false,
+        staticImageMode: false,
+      });
 
       const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!ctx) {
+        animationRef.current = requestAnimationFrame(() => detectLoop());
+        return;
+      }
 
-        if (faces.length > 0) {
-          setFaceDetected(true);
-          const face = faces[0];
-          const keypoints = face.keypoints;
+      // Clear canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-          if (!keypoints || keypoints.length === 0) {
-            console.warn('[FaceDetection] detectLoop: No keypoints found in detected face object. Face object:', face);
-            animationRef.current = requestAnimationFrame(() => detectLoop());
-            return;
-          }
+      if (faces.length > 0) {
+        setFaceDetected(true);
+        const face = faces[0];
+        const keypoints = face.keypoints || [];
+
+        if (keypoints.length > 0) {
+          setDetectionCount(prev => prev + 1);
           
-          console.log(`[FaceDetection] detectLoop: Keypoints found for face: ${keypoints.length}`);
-
-          // Draw face mesh
+          // Draw face landmarks for visualization
           ctx.fillStyle = '#6366f1';
           ctx.strokeStyle = '#6366f1';
-          ctx.lineWidth = 1;
+          ctx.lineWidth = 2;
 
-          keypoints.forEach((point) => {
-            const x = point.x;
-            const y = point.y;
-            ctx.beginPath();
-            ctx.arc(x, y, 1, 0, 2 * Math.PI);
-            ctx.fill();
+          // Draw key facial features
+          keypoints.forEach((point, index) => {
+            // Only draw important keypoints to improve performance
+            if (index % 10 === 0 || 
+                [33, 133, 159, 145, 362, 263, 386, 374, 61, 291, 13, 14, 234, 454, 70, 300].includes(index)) {
+              ctx.beginPath();
+              ctx.arc(point.x, point.y, 2, 0, 2 * Math.PI);
+              ctx.fill();
+            }
           });
-          
-          try {
-            const mood = analyzeMood(keypoints);
-            
-            // DEBUG: Draw metrics on canvas
-            // We need to recalculate them here or return them from analyzeMood. 
-            // For now, let's just trust the console logs from analyzeMood, 
-            // but we'll add a visual indicator of the detected mood on the canvas too.
-            ctx.font = '20px Arial';
-            ctx.fillStyle = 'white';
-            ctx.fillText(`Mood: ${mood}`, 10, 30);
-            
-            setDetectedMood(mood);
-            setIsAnalyzing(false);
 
-            addMoodEntry({
-              date: new Date().toISOString(),
-              mood: mood,
-              source: 'webcam'
-            });
+          // Draw face bounding box
+          if (face.box) {
+            ctx.strokeStyle = '#10b981';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(
+              face.box.xMin,
+              face.box.yMin,
+              face.box.width,
+              face.box.height
+            );
+          }
 
-            setTimeout(() => {
-              stopCamera();
-              if (onMoodDetected) {
-                onMoodDetected();
-              }
-            }, 2000);
+          // Analyze mood after collecting a few frames for stability
+          if (detectionCount >= 5) {
+            try {
+              const mood = analyzeMood(keypoints);
+              
+              // Display mood on canvas
+              ctx.font = 'bold 24px Arial';
+              ctx.fillStyle = 'white';
+              ctx.strokeStyle = 'black';
+              ctx.lineWidth = 4;
+              ctx.strokeText(`Mood: ${mood}`, 15, 40);
+              ctx.fillText(`Mood: ${mood}`, 15, 40);
+              
+              setDetectedMood(mood);
+              setIsAnalyzing(false);
 
-            return;
-          } catch (analysisErr) {
-            console.error('[FaceDetection] Analysis error:', analysisErr);
+              // Save mood entry
+              addMoodEntry({
+                date: new Date().toISOString(),
+                mood: mood,
+                source: 'webcam'
+              });
+
+              // Stop detection after 2 seconds
+              setTimeout(() => {
+                stopCamera();
+                if (onMoodDetected) {
+                  onMoodDetected();
+                }
+              }, 2000);
+
+              return;
+            } catch (analysisErr) {
+              console.error('[FaceDetection] Analysis error:', analysisErr);
+            }
           }
         } else {
-          setFaceDetected(false);
+          console.warn('[FaceDetection] Face detected but no keypoints available');
         }
+      } else {
+        setFaceDetected(false);
+        setDetectionCount(0);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('[FaceDetection] Detection error:', err);
-      setError('An error occurred during face detection.');
+      setError(`Detection error: ${err.message || 'Unknown error'}`);
+      setIsAnalyzing(false);
+      return;
     }
 
     // Continue the loop only if still analyzing and no mood has been detected
@@ -307,21 +469,28 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
   // Start mood detection
   const startDetection = () => {
-    if (!model) {
+    if (!detectorRef.current) {
       setError('AI model not loaded yet. Please wait...');
+      return;
+    }
+
+    if (!isCameraActive) {
+      setError('Please start the camera first.');
       return;
     }
 
     setIsAnalyzing(true);
     setDetectedMood(null);
     setFaceDetected(false);
+    setDetectionCount(0);
     setError('');
     detectLoop();
 
+    // Timeout after 30 seconds
     setTimeout(() => {
-      if (isAnalyzing) {
+      if (isAnalyzing && !detectedMood) {
         setIsAnalyzing(false);
-        setError('Detection timeout. Please try again.');
+        setError('Detection timeout. Please ensure your face is clearly visible and try again.');
       }
     }, 30000);
   };
@@ -452,19 +621,29 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
           </div>
         )}
 
-        {/* Debug Info Overlay */}
+        {/* Status Info Overlay */}
         <div style={{
           position: 'absolute',
           top: '0.5rem',
           right: '0.5rem',
-          background: 'rgba(0,0,0,0.5)',
-          padding: '0.25rem 0.5rem',
-          borderRadius: '4px',
+          background: 'rgba(0,0,0,0.7)',
+          backdropFilter: 'blur(10px)',
+          padding: '0.5rem 0.75rem',
+          borderRadius: '8px',
           fontSize: '0.7rem',
-          color: 'rgba(255,255,255,0.7)',
-          pointerEvents: 'none'
+          color: 'rgba(255,255,255,0.9)',
+          pointerEvents: 'none',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.25rem'
         }}>
-          Model: {model ? 'Loaded' : 'Loading...'} | Backend: {tf.getBackend()}
+          <div>Model: {detectorRef.current ? '✓ Loaded' : 'Loading...'}</div>
+          <div>Backend: {tf.getBackend()}</div>
+          {isAnalyzing && faceDetected && (
+            <div style={{ color: '#10b981' }}>
+              Face: ✓ Detected ({detectionCount} frames)
+            </div>
+          )}
         </div>
       </div>
 
@@ -472,12 +651,13 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         display: 'flex',
         gap: '1rem',
         justifyContent: 'center',
-        marginBottom: '1.5rem'
+        marginBottom: '1.5rem',
+        flexWrap: 'wrap'
       }}>
         {isLoading ? (
           <button className="btn btn-secondary" disabled>
             <Loader2 className="animate-spin" size={18} />
-            Loading AI Model...
+            {modelLoadProgress}
           </button>
         ) : !isCameraActive ? (
           <button
@@ -493,13 +673,13 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             <button
               className="btn btn-primary"
               onClick={startDetection}
-              disabled={isAnalyzing}
+              disabled={isAnalyzing || !detectorRef.current}
               style={{ minWidth: '180px' }}
             >
               {isAnalyzing ? (
                 <>
                   <Loader2 className="animate-spin" size={20} />
-                  Detecting...
+                  {faceDetected ? 'Analyzing...' : 'Detecting face...'}
                 </>
               ) : (
                 <>
@@ -511,6 +691,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             <button
               className="btn btn-secondary"
               onClick={stopCamera}
+              disabled={isAnalyzing}
             >
               Stop Camera
             </button>
@@ -544,10 +725,18 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             borderRadius: 'var(--radius-lg)',
             textAlign: 'center',
             color: 'white',
-            boxShadow: 'var(--shadow-glow)'
+            boxShadow: 'var(--shadow-glow)',
+            marginTop: '1rem'
           }}
         >
-          <div style={{ fontSize: '5rem', marginBottom: '1rem', animation: 'scaleIn 0.5s ease-out' }}>
+          <div style={{ 
+            fontSize: '5rem', 
+            marginBottom: '1rem', 
+            animation: 'scaleIn 0.5s ease-out',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center'
+          }}>
             {getMoodEmoji(detectedMood)}
           </div>
           <p style={{ fontSize: '0.95rem', opacity: 0.9, marginBottom: '0.5rem' }}>
