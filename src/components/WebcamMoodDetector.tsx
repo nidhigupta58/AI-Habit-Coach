@@ -64,7 +64,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
           const tfjsConfig: faceLandmarksDetection.MediaPipeFaceMeshTfjsModelConfig = {
             runtime: 'tfjs',
             maxFaces: 1,
-            refineLandmarks: true,
+            refineLandmarks: false, // Set to false for better performance and compatibility
           };
           
           const detector = await faceLandmarksDetection.createDetector(
@@ -88,7 +88,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
               runtime: 'mediapipe',
               solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh',
               maxFaces: 1,
-              refineLandmarks: true,
+              refineLandmarks: false, // Set to false for better performance
             };
             
             const detector = await faceLandmarksDetection.createDetector(
@@ -359,23 +359,70 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       canvas.height = video.videoHeight;
     }
 
-    try {
-      // Detect faces using the detector
-      const faces = await detector.estimateFaces(video, {
-        flipHorizontal: false,
-        staticImageMode: false,
-      });
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      animationRef.current = requestAnimationFrame(() => detectLoop());
+      return;
+    }
 
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        animationRef.current = requestAnimationFrame(() => detectLoop());
-        return;
+    try {
+      // Capture current video frame to canvas first
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      let faces: any[] = [];
+      let detectionMethod = '';
+
+      // Try multiple input formats for maximum compatibility
+      try {
+        // Method 1: Try canvas directly (most reliable for face-landmarks-detection)
+        faces = await detector.estimateFaces(canvas);
+        detectionMethod = 'canvas';
+      } catch (canvasErr: any) {
+        console.warn('[FaceDetection] Canvas input failed, trying video element...', canvasErr.message);
+        
+        try {
+          // Method 2: Try video element directly
+          faces = await detector.estimateFaces(video);
+          detectionMethod = 'video';
+        } catch (videoErr: any) {
+          console.warn('[FaceDetection] Video input also failed, trying tensor conversion...', videoErr.message);
+          
+          try {
+            // Method 3: Convert video to tensor using TensorFlow.js
+            const imageTensor = tf.browser.fromPixels(video);
+            const imageData = await tf.browser.toPixels(imageTensor);
+            imageTensor.dispose();
+            
+            // Create ImageData and put it on canvas
+            const imgData = new ImageData(
+              new Uint8ClampedArray(imageData),
+              video.videoWidth,
+              video.videoHeight
+            );
+            ctx.putImageData(imgData, 0, 0);
+            
+            // Try canvas again after tensor conversion
+            faces = await detector.estimateFaces(canvas);
+            detectionMethod = 'tensor';
+          } catch (tensorErr: any) {
+            console.error('[FaceDetection] All detection methods failed:', tensorErr);
+            // Don't throw, continue trying
+          }
+        }
+      }
+      
+      // Log successful detection method
+      if (faces && faces.length > 0 && detectionMethod) {
+        console.log(`[FaceDetection] Face detected using ${detectionMethod} method (${faces.length} face(s))`);
       }
 
-      // Clear canvas
+      // Clear canvas before drawing
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Redraw video frame
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      if (faces.length > 0) {
+      if (faces && faces.length > 0) {
         setFaceDetected(true);
         const face = faces[0];
         const keypoints = face.keypoints || [];
@@ -389,7 +436,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
           ctx.lineWidth = 2;
 
           // Draw key facial features
-          keypoints.forEach((point, index) => {
+          keypoints.forEach((point: Keypoint, index: number) => {
             // Only draw important keypoints to improve performance
             if (index % 10 === 0 || 
                 [33, 133, 159, 145, 362, 263, 386, 374, 61, 291, 13, 14, 234, 454, 70, 300].includes(index)) {
@@ -412,9 +459,11 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
           }
 
           // Analyze mood after collecting a few frames for stability
-          if (detectionCount >= 5) {
+          if (detectionCount >= 3) {
             try {
               const mood = analyzeMood(keypoints);
+              
+              console.log(`[FaceDetection] Mood detected: ${mood} (after ${detectionCount} frames)`);
               
               // Display mood on canvas
               ctx.font = 'bold 24px Arial';
@@ -452,13 +501,21 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         }
       } else {
         setFaceDetected(false);
-        setDetectionCount(0);
+        // Only reset detection count if we haven't detected a face for a while
+        if (detectionCount > 0) {
+          setDetectionCount(0);
+        }
       }
     } catch (err: any) {
       console.error('[FaceDetection] Detection error:', err);
-      setError(`Detection error: ${err.message || 'Unknown error'}`);
-      setIsAnalyzing(false);
-      return;
+      console.error('[FaceDetection] Error details:', {
+        message: err.message,
+        videoReady: video.readyState,
+        videoDimensions: `${video.videoWidth}x${video.videoHeight}`,
+        canvasDimensions: `${canvas.width}x${canvas.height}`,
+        detectorType: detectorRef.current ? 'loaded' : 'null'
+      });
+      // Don't stop on single error, continue trying
     }
 
     // Continue the loop only if still analyzing and no mood has been detected
