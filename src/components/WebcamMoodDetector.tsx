@@ -153,6 +153,10 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         streamRef.current = stream;
         setIsCameraActive(true);
         console.log('[FaceDetection] Camera started successfully');
+        console.log('[FaceDetection] Video dimensions:', videoRef.current.videoWidth, 'x', videoRef.current.videoHeight);
+        
+        // Wait a bit for video to stabilize
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
     } catch (err: any) {
       console.error('[FaceDetection] Camera error:', err);
@@ -344,11 +348,29 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
     // Ensure video is ready with actual frame data
     if (video.readyState < video.HAVE_ENOUGH_DATA) {
+      if (detectionCount === 0) {
+        console.log('[FaceDetection] Waiting for video data (readyState:', video.readyState, ')');
+      }
       animationRef.current = requestAnimationFrame(() => detectLoop());
       return;
     }
 
     if (!video.videoWidth || !video.videoHeight) {
+      if (detectionCount === 0) {
+        console.log('[FaceDetection] Waiting for video dimensions...');
+      }
+      animationRef.current = requestAnimationFrame(() => detectLoop());
+      return;
+    }
+
+    // Ensure video is actually playing
+    if (video.paused || video.ended) {
+      console.warn('[FaceDetection] Video is paused or ended, attempting to play...');
+      try {
+        await video.play();
+      } catch (playErr) {
+        console.error('[FaceDetection] Failed to play video:', playErr);
+      }
       animationRef.current = requestAnimationFrame(() => detectLoop());
       return;
     }
@@ -371,24 +393,32 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       
       let faces: any[] = [];
       let detectionMethod = '';
+      let lastError: any = null;
 
       // Try multiple input formats for maximum compatibility
       try {
         // Method 1: Try canvas directly (most reliable for face-landmarks-detection)
+        console.log('[FaceDetection] Attempting detection with canvas...');
         faces = await detector.estimateFaces(canvas);
         detectionMethod = 'canvas';
+        console.log(`[FaceDetection] Canvas method returned ${faces?.length || 0} faces`);
       } catch (canvasErr: any) {
-        console.warn('[FaceDetection] Canvas input failed, trying video element...', canvasErr.message);
+        lastError = canvasErr;
+        console.warn('[FaceDetection] Canvas input failed:', canvasErr.message);
         
         try {
           // Method 2: Try video element directly
+          console.log('[FaceDetection] Attempting detection with video element...');
           faces = await detector.estimateFaces(video);
           detectionMethod = 'video';
+          console.log(`[FaceDetection] Video method returned ${faces?.length || 0} faces`);
         } catch (videoErr: any) {
-          console.warn('[FaceDetection] Video input also failed, trying tensor conversion...', videoErr.message);
+          lastError = videoErr;
+          console.warn('[FaceDetection] Video input also failed:', videoErr.message);
           
           try {
             // Method 3: Convert video to tensor using TensorFlow.js
+            console.log('[FaceDetection] Attempting detection with tensor conversion...');
             const imageTensor = tf.browser.fromPixels(video);
             const imageData = await tf.browser.toPixels(imageTensor);
             imageTensor.dispose();
@@ -404,16 +434,29 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             // Try canvas again after tensor conversion
             faces = await detector.estimateFaces(canvas);
             detectionMethod = 'tensor';
+            console.log(`[FaceDetection] Tensor method returned ${faces?.length || 0} faces`);
           } catch (tensorErr: any) {
+            lastError = tensorErr;
             console.error('[FaceDetection] All detection methods failed:', tensorErr);
-            // Don't throw, continue trying
+            console.error('[FaceDetection] Last error details:', {
+              message: tensorErr.message,
+              stack: tensorErr.stack,
+              name: tensorErr.name
+            });
           }
         }
       }
       
-      // Log successful detection method
+      // Log detection results
       if (faces && faces.length > 0 && detectionMethod) {
-        console.log(`[FaceDetection] Face detected using ${detectionMethod} method (${faces.length} face(s))`);
+        console.log(`[FaceDetection] ✓ Face detected using ${detectionMethod} method (${faces.length} face(s))`);
+      } else if (faces && faces.length === 0) {
+        // Log when no faces detected (but API call succeeded)
+        if (detectionCount % 30 === 0) { // Log every 30 frames to avoid spam
+          console.log(`[FaceDetection] No faces detected (method: ${detectionMethod || 'unknown'})`);
+        }
+      } else if (lastError && detectionCount % 30 === 0) {
+        console.warn(`[FaceDetection] Detection failed: ${lastError.message}`);
       }
 
       // Clear canvas before drawing
@@ -426,6 +469,8 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         setFaceDetected(true);
         const face = faces[0];
         const keypoints = face.keypoints || [];
+
+        console.log(`[FaceDetection] Processing face with ${keypoints.length} keypoints`);
 
         if (keypoints.length > 0) {
           setDetectionCount(prev => prev + 1);
@@ -505,6 +550,10 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         if (detectionCount > 0) {
           setDetectionCount(0);
         }
+        // Log periodically when no faces are detected
+        if (detectionCount === 0 && Math.random() < 0.01) { // ~1% chance to log
+          console.log('[FaceDetection] No faces in frame. Ensure good lighting and face is clearly visible.');
+        }
       }
     } catch (err: any) {
       console.error('[FaceDetection] Detection error:', err);
@@ -536,6 +585,21 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       return;
     }
 
+    if (!videoRef.current) {
+      setError('Video element not available.');
+      return;
+    }
+
+    console.log('[FaceDetection] Starting detection...');
+    console.log('[FaceDetection] Detector available:', !!detectorRef.current);
+    console.log('[FaceDetection] Video state:', {
+      readyState: videoRef.current.readyState,
+      paused: videoRef.current.paused,
+      ended: videoRef.current.ended,
+      width: videoRef.current.videoWidth,
+      height: videoRef.current.videoHeight
+    });
+
     setIsAnalyzing(true);
     setDetectedMood(null);
     setFaceDetected(false);
@@ -547,7 +611,8 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     setTimeout(() => {
       if (isAnalyzing && !detectedMood) {
         setIsAnalyzing(false);
-        setError('Detection timeout. Please ensure your face is clearly visible and try again.');
+        setError('Detection timeout. Please ensure your face is clearly visible, well-lit, and try again.');
+        console.warn('[FaceDetection] Detection timeout after 30 seconds');
       }
     }, 30000);
   };
