@@ -2,7 +2,6 @@ import React, { useRef, useState, useEffect } from 'react';
 import { Camera, Sparkles, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import * as tf from '@tensorflow/tfjs';
-import '@tensorflow/tfjs-backend-webgl';
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection';
 
 interface WebcamMoodDetectorProps {
@@ -323,17 +322,20 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
       // Determine mood based on metrics with improved thresholds
       // Happy: Smile detected (mouth corners raised, wide mouth)
-      if (smileRatio > 0.40 && mouthCurvature > 0) {
+      // Lowered threshold to 0.35 and relaxed curvature
+      if (smileRatio > 0.35 && mouthCurvature > -2) {
         return 'Happy';
       }
       
       // Tired: Eyes are closed or very narrow (low EAR)
-      if (avgEAR < 0.20) {
+      // Raised threshold to 0.23 to catch tiredness earlier
+      if (avgEAR < 0.23) {
         return 'Tired';
       }
       
       // Stressed: Eyebrows lowered (frowning), narrow eyes
-      if (browRatio < 0.10 || (browRatio < 0.12 && avgEAR < 0.25)) {
+      // Relaxed brow ratio threshold
+      if (browRatio < 0.14 || (browRatio < 0.15 && avgEAR < 0.28)) {
         return 'Stressed';
       }
       
@@ -515,43 +517,61 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             );
           }
 
-          // Analyze mood after collecting a few frames for stability
-          if (detectionCount >= 3) {
+          // Analyze mood after collecting enough frames for stability
+          // Increased frames to 20 (~1 second) for better stability
+          if (detectionCount >= 20) {
             try {
               const mood = analyzeMood(keypoints);
               
-              console.log(`[FaceDetection] Mood detected: ${mood} (after ${detectionCount} frames)`);
-              
-              // Display mood on canvas
+              // We could accumulate moods here, but for now simple delay is much better than instant
+              // Log the progression
+              console.log(`[FaceDetection] Frame ${detectionCount}: ${mood}`);
+
+              // Display live feedback on canvas before finalizing
               ctx.font = 'bold 24px Arial';
-              ctx.fillStyle = 'white';
-              ctx.strokeStyle = 'black';
-              ctx.lineWidth = 4;
-              ctx.strokeText(`Mood: ${mood}`, 15, 40);
-              ctx.fillText(`Mood: ${mood}`, 15, 40);
-              
-              setDetectedMood(mood);
-              setIsAnalyzing(false);
+              ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+              ctx.fillText(`Scanning... ${(detectionCount / 30 * 100).toFixed(0)}%`, 15, 40);
 
-              // Save mood entry
-              addMoodEntry({
-                date: new Date().toISOString(),
-                mood: mood,
-                source: 'webcam'
-              });
+              // Finalize after 30 frames total (approx 1-1.5s)
+              if (detectionCount >= 30) {
+                 console.log(`[FaceDetection] Finalizing mood: ${mood}`);
+                 
+                 // Display finalized mood
+                 ctx.clearRect(0, 0, canvas.width, 60); // Clear header area
+                 ctx.fillStyle = 'white';
+                 ctx.strokeStyle = 'black';
+                 ctx.lineWidth = 4;
+                 ctx.strokeText(`Mood: ${mood}`, 15, 40);
+                 ctx.fillText(`Mood: ${mood}`, 15, 40);
+                 
+                 setDetectedMood(mood);
+                 setIsAnalyzing(false);
 
-              // Stop detection after 2 seconds
-              setTimeout(() => {
-                stopCamera();
-                if (onMoodDetected) {
-                  onMoodDetected();
-                }
-              }, 2000);
+                 // Save mood entry
+                 addMoodEntry({
+                   date: new Date().toISOString(),
+                   mood: mood,
+                   source: 'webcam'
+                 });
 
-              return;
+                 // Stop detection after 2 seconds
+                 setTimeout(() => {
+                   stopCamera();
+                   if (onMoodDetected) {
+                     onMoodDetected();
+                   }
+                 }, 2000);
+
+                 return;
+              }
             } catch (analysisErr) {
               console.error('[FaceDetection] Analysis error:', analysisErr);
             }
+          } else if (detectionCount > 0) {
+             // Show scanning progress
+             ctx.font = '16px Arial';
+             ctx.fillStyle = 'white';
+             ctx.fillText(`Aligning face...`, 15, 40);
           }
         } else {
           console.warn('[FaceDetection] Face detected but no keypoints available');
