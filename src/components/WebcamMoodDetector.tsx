@@ -24,6 +24,10 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
   const animationRef = useRef<number>(0);
   const streamRef = useRef<MediaStream | null>(null);
   const detectorRef = useRef<faceLandmarksDetection.FaceLandmarksDetector | null>(null);
+  const isAnalyzingRef = useRef<boolean>(false);
+  const detectedMoodRef = useRef<MoodType | null>(null);
+  const detectionCountRef = useRef<number>(0);
+  const moodHistoryRef = useRef<MoodType[]>([]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -141,7 +145,9 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     try {
       setError('');
       setDetectedMood(null);
+      detectedMoodRef.current = null;
       setFaceDetected(false);
+      detectionCountRef.current = 0;
       setDetectionCount(0);
       console.log('[FaceDetection] Requesting camera access...');
       
@@ -193,7 +199,9 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     }
     setIsCameraActive(false);
     setIsAnalyzing(false);
+    isAnalyzingRef.current = false;
     setFaceDetected(false);
+    detectedMoodRef.current = null;
     
     if (canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d');
@@ -321,25 +329,126 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       });
 
       // Determine mood based on metrics with improved thresholds
-      // Happy: Smile detected (mouth corners raised, wide mouth)
-      // Lowered threshold to 0.35 and relaxed curvature
-      if (smileRatio > 0.35 && mouthCurvature > -2) {
-        return 'Happy';
+      // Use a weighted scoring system that considers magnitude of expressions
+      
+      let happyScore = 0;
+      let stressedScore = 0;
+      let tiredScore = 0;
+      let focusedScore = 0;
+      
+      // Tired scoring: Low eye aspect ratio (eyes closed/narrow)
+      // More closed = higher score
+      if (avgEAR < 0.18) {
+        tiredScore += 5; // Very closed eyes
+      } else if (avgEAR < 0.22) {
+        tiredScore += 3; // Closed eyes
+      } else if (avgEAR < 0.25) {
+        tiredScore += 1; // Slightly closed
       }
       
-      // Tired: Eyes are closed or very narrow (low EAR)
-      // Raised threshold to 0.23 to catch tiredness earlier
-      if (avgEAR < 0.23) {
-        return 'Tired';
+      // Stressed scoring: Frowning (negative mouth curvature), lowered brows, narrow eyes
+      // Use magnitude of negative curvature - more negative = more stressed
+      if (mouthCurvature < -8) {
+        stressedScore += 5; // Very strong frown
+      } else if (mouthCurvature < -5) {
+        stressedScore += 4; // Strong frown
+      } else if (mouthCurvature < -3) {
+        stressedScore += 3; // Clear frown
+      } else if (mouthCurvature < -1.5) {
+        stressedScore += 2; // Moderate frown
+      } else if (mouthCurvature < -0.5) {
+        stressedScore += 1; // Slight frown
       }
       
-      // Stressed: Eyebrows lowered (frowning), narrow eyes
-      // Relaxed brow ratio threshold
-      if (browRatio < 0.14 || (browRatio < 0.15 && avgEAR < 0.28)) {
-        return 'Stressed';
+      // Lowered brows contribute to stress
+      if (browRatio < 0.12) {
+        stressedScore += 3; // Very lowered brows
+      } else if (browRatio < 0.14) {
+        stressedScore += 2; // Lowered brows
+      } else if (browRatio < 0.16) {
+        stressedScore += 1; // Slightly lowered
       }
       
-      // Focused: Neutral expression, eyes open, normal features
+      // Narrow eyes + lowered brows = stress
+      if (avgEAR < 0.25 && browRatio < 0.15) {
+        stressedScore += 2;
+      }
+      
+      // Happy scoring: Wide smile (high smile ratio) AND raised mouth corners (positive curvature)
+      // Both conditions must be met for a genuine smile
+      // Use magnitude of positive curvature - more positive = happier
+      if (mouthCurvature > 3.0 && smileRatio > 0.45) {
+        happyScore += 5; // Very big smile
+      } else if (mouthCurvature > 2.5 && smileRatio > 0.42) {
+        happyScore += 4; // Big smile
+      } else if (mouthCurvature > 2.0 && smileRatio > 0.40) {
+        happyScore += 3; // Clear smile
+      } else if (mouthCurvature > 1.5 && smileRatio > 0.38) {
+        happyScore += 2; // Moderate smile
+      } else if (mouthCurvature > 1.0 && smileRatio > 0.36) {
+        happyScore += 1; // Slight smile
+      }
+      
+      // Penalize happy if there's any frown (negative curvature)
+      if (mouthCurvature < 0) {
+        happyScore = Math.max(0, happyScore - 2); // Reduce happy score if frowning
+      }
+      
+      // Focused scoring: Normal eye aspect ratio, neutral mouth, normal brows
+      // Neutral expression with open eyes
+      const isNeutralMouth = mouthCurvature >= -1.0 && mouthCurvature <= 1.5;
+      const isNormalEyes = avgEAR >= 0.25 && avgEAR <= 0.32;
+      const isNormalBrows = browRatio >= 0.16 && browRatio <= 0.22;
+      
+      if (isNeutralMouth && isNormalEyes && isNormalBrows) {
+        focusedScore += 4; // Perfect neutral/focused
+      } else if (isNeutralMouth && isNormalEyes) {
+        focusedScore += 2; // Mostly neutral
+      } else if (isNormalEyes && mouthCurvature >= -1.5 && mouthCurvature <= 2.0) {
+        focusedScore += 1; // Reasonably neutral
+      }
+      
+      // Determine mood based on highest score
+      const scores = [
+        { mood: 'Tired' as MoodType, score: tiredScore },
+        { mood: 'Stressed' as MoodType, score: stressedScore },
+        { mood: 'Happy' as MoodType, score: happyScore },
+        { mood: 'Focused' as MoodType, score: focusedScore }
+      ];
+      
+      // Sort by score (highest first)
+      scores.sort((a, b) => b.score - a.score);
+      
+      // Log scores for debugging (only occasionally to avoid spam)
+      if (detectionCountRef.current % 10 === 0) {
+        console.log('[FaceDetection] Mood scores:', {
+          Happy: happyScore,
+          Stressed: stressedScore,
+          Tired: tiredScore,
+          Focused: focusedScore,
+          Selected: scores[0].mood,
+          TopScore: scores[0].score,
+          SecondScore: scores[1].score
+        });
+      }
+      
+      // If top score is 0, default to Focused
+      const topMood = scores[0];
+      const secondMood = scores[1];
+      
+      if (topMood.score === 0) {
+        return 'Focused';
+      }
+      
+      // If top score is significantly higher (at least 2 points more), use it
+      // Otherwise, if scores are close, prefer Focused for neutral expressions
+      if (topMood.score >= 3 && topMood.score >= secondMood.score + 2) {
+        return topMood.mood;
+      } else if (topMood.score >= 2 && topMood.score >= secondMood.score + 1) {
+        return topMood.mood;
+      }
+      
+      // Default to Focused for ambiguous cases or low confidence
       return 'Focused';
     } catch (err) {
       console.error('[FaceDetection] Error in mood analysis:', err);
@@ -349,7 +458,7 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
 
   // Main detection loop
   const detectLoop = async () => {
-    if (!detectorRef.current || !videoRef.current || !canvasRef.current || !isAnalyzing || !streamRef.current) {
+    if (!detectorRef.current || !videoRef.current || !canvasRef.current || !isAnalyzingRef.current || !streamRef.current) {
       return;
     }
 
@@ -407,31 +516,48 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       let lastError: Error | null = null;
 
       // Try multiple input formats for maximum compatibility
+      // Only log first attempt to avoid console spam
+      const shouldLog = detectionCount === 0 || detectionCount % 30 === 0;
+      
       try {
         // Method 1: Try canvas directly (most reliable for face-landmarks-detection)
-        console.log('[FaceDetection] Attempting detection with canvas...');
-        faces = await detector.estimateFaces(canvas);
+        if (shouldLog) {
+          console.log('[FaceDetection] Attempting detection with canvas...');
+        }
+        faces = await detector.estimateFaces(canvas, { flipHorizontal: false });
         detectionMethod = 'canvas';
-        console.log(`[FaceDetection] Canvas method returned ${faces?.length || 0} faces`);
+        if (shouldLog && faces) {
+          console.log(`[FaceDetection] Canvas method returned ${faces.length} faces`);
+        }
       } catch (canvasErr: unknown) {
         lastError = canvasErr as Error;
         const canvasError = canvasErr as Error;
-        console.warn('[FaceDetection] Canvas input failed:', canvasError.message);
+        if (shouldLog) {
+          console.warn('[FaceDetection] Canvas input failed:', canvasError.message);
+        }
         
         try {
           // Method 2: Try video element directly
-          console.log('[FaceDetection] Attempting detection with video element...');
-          faces = await detector.estimateFaces(video);
+          if (shouldLog) {
+            console.log('[FaceDetection] Attempting detection with video element...');
+          }
+          faces = await detector.estimateFaces(video, { flipHorizontal: false });
           detectionMethod = 'video';
-          console.log(`[FaceDetection] Video method returned ${faces?.length || 0} faces`);
+          if (shouldLog && faces) {
+            console.log(`[FaceDetection] Video method returned ${faces.length} faces`);
+          }
         } catch (videoErr: unknown) {
           lastError = videoErr as Error;
           const videoError = videoErr as Error;
-          console.warn('[FaceDetection] Video input also failed:', videoError.message);
+          if (shouldLog) {
+            console.warn('[FaceDetection] Video input also failed:', videoError.message);
+          }
           
           try {
             // Method 3: Convert video to tensor using TensorFlow.js
-            console.log('[FaceDetection] Attempting detection with tensor conversion...');
+            if (shouldLog) {
+              console.log('[FaceDetection] Attempting detection with tensor conversion...');
+            }
             const imageTensor = tf.browser.fromPixels(video);
             const imageData = await tf.browser.toPixels(imageTensor);
             imageTensor.dispose();
@@ -445,32 +571,35 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             ctx.putImageData(imgData, 0, 0);
             
             // Try canvas again after tensor conversion
-            faces = await detector.estimateFaces(canvas);
+            faces = await detector.estimateFaces(canvas, { flipHorizontal: false });
             detectionMethod = 'tensor';
-            console.log(`[FaceDetection] Tensor method returned ${faces?.length || 0} faces`);
+            if (shouldLog && faces) {
+              console.log(`[FaceDetection] Tensor method returned ${faces.length} faces`);
+            }
           } catch (tensorErr: unknown) {
             lastError = tensorErr as Error;
             const tensorError = tensorErr as Error;
-            console.error('[FaceDetection] All detection methods failed:', tensorError);
-            console.error('[FaceDetection] Last error details:', {
-              message: tensorError.message,
-              stack: tensorError.stack,
-              name: tensorError.name
-            });
+            if (shouldLog) {
+              console.error('[FaceDetection] All detection methods failed:', tensorError);
+              console.error('[FaceDetection] Last error details:', {
+                message: tensorError.message,
+                stack: tensorError.stack,
+                name: tensorError.name
+              });
+            }
           }
         }
       }
       
-      // Log detection results
-      if (faces && faces.length > 0 && detectionMethod) {
-        console.log(`[FaceDetection] ✓ Face detected using ${detectionMethod} method (${faces.length} face(s))`);
-      } else if (faces && faces.length === 0) {
-        // Log when no faces detected (but API call succeeded)
-        if (detectionCount % 30 === 0) { // Log every 30 frames to avoid spam
+      // Log detection results (only occasionally to avoid spam)
+      if (detectionCountRef.current % 30 === 0) {
+        if (faces && faces.length > 0 && detectionMethod) {
+          console.log(`[FaceDetection] ✓ Face detected using ${detectionMethod} method (${faces.length} face(s))`);
+        } else if (faces && faces.length === 0) {
           console.log(`[FaceDetection] No faces detected (method: ${detectionMethod || 'unknown'})`);
+        } else if (lastError) {
+          console.warn(`[FaceDetection] Detection failed: ${lastError.message}`);
         }
-      } else if (lastError && detectionCount % 30 === 0) {
-        console.warn(`[FaceDetection] Detection failed: ${lastError.message}`);
       }
 
       // Clear canvas before drawing
@@ -487,7 +616,14 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
         console.log(`[FaceDetection] Processing face with ${keypoints.length} keypoints`);
 
         if (keypoints.length > 0) {
-          setDetectionCount(prev => prev + 1);
+          detectionCountRef.current += 1;
+          const currentCount = detectionCountRef.current;
+          setDetectionCount(currentCount);
+          
+          // Log progress every 5 frames for debugging
+          if (currentCount % 5 === 0) {
+            console.log(`[FaceDetection] Detection count: ${currentCount}/20`);
+          }
           
           // Draw face landmarks for visualization
           ctx.fillStyle = '#6366f1';
@@ -518,39 +654,69 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
           }
 
           // Analyze mood after collecting enough frames for stability
-          // Increased frames to 20 (~1 second) for better stability
-          if (detectionCount >= 20) {
+          // Start analyzing after 10 frames, finalize after 20 frames
+          // Use ref value to avoid stale closure issues
+          if (currentCount >= 10) {
             try {
               const mood = analyzeMood(keypoints);
               
-              // We could accumulate moods here, but for now simple delay is much better than instant
+              // Store mood in history for averaging across frames
+              moodHistoryRef.current.push(mood);
+              // Keep only last 10 moods for averaging
+              if (moodHistoryRef.current.length > 10) {
+                moodHistoryRef.current.shift();
+              }
+              
               // Log the progression
-              console.log(`[FaceDetection] Frame ${detectionCount}: ${mood}`);
+              console.log(`[FaceDetection] Frame ${currentCount}: ${mood}`);
 
               // Display live feedback on canvas before finalizing
               ctx.font = 'bold 24px Arial';
               ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-              ctx.fillText(`Scanning... ${(detectionCount / 30 * 100).toFixed(0)}%`, 15, 40);
+              ctx.fillText(`Scanning... ${Math.min((currentCount / 20 * 100), 100).toFixed(0)}%`, 15, 40);
 
-              // Finalize after 30 frames total (approx 1-1.5s)
-              if (detectionCount >= 30) {
-                 console.log(`[FaceDetection] Finalizing mood: ${mood}`);
+              // Finalize after 20 frames total (approx 0.7-1s at 30fps)
+              if (currentCount >= 20) {
+                 // Calculate final mood by finding most common mood in recent history
+                 // This averages across multiple frames for more stable results
+                 const moodCounts: Record<MoodType, number> = {
+                   Happy: 0,
+                   Stressed: 0,
+                   Tired: 0,
+                   Focused: 0
+                 };
+                 
+                 moodHistoryRef.current.forEach(m => {
+                   moodCounts[m]++;
+                 });
+                 
+                 // Find the mood with highest count (most frequent)
+                 const finalMood = (Object.entries(moodCounts) as [MoodType, number][])
+                   .sort((a, b) => b[1] - a[1])[0][0];
+                 
+                 console.log(`[FaceDetection] Finalizing mood: ${finalMood} (from ${moodHistoryRef.current.length} frames)`);
+                 console.log(`[FaceDetection] Mood distribution:`, moodCounts);
                  
                  // Display finalized mood
                  ctx.clearRect(0, 0, canvas.width, 60); // Clear header area
                  ctx.fillStyle = 'white';
                  ctx.strokeStyle = 'black';
                  ctx.lineWidth = 4;
-                 ctx.strokeText(`Mood: ${mood}`, 15, 40);
-                 ctx.fillText(`Mood: ${mood}`, 15, 40);
+                 ctx.strokeText(`Mood: ${finalMood}`, 15, 40);
+                 ctx.fillText(`Mood: ${finalMood}`, 15, 40);
                  
-                 setDetectedMood(mood);
+                 setDetectedMood(finalMood);
+                 detectedMoodRef.current = finalMood;
                  setIsAnalyzing(false);
+                 isAnalyzingRef.current = false;
+                 
+                 // Clear mood history for next detection
+                 moodHistoryRef.current = [];
 
                  // Save mood entry
                  addMoodEntry({
                    date: new Date().toISOString(),
-                   mood: mood,
+                   mood: finalMood,
                    source: 'webcam'
                  });
 
@@ -567,38 +733,47 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
             } catch (analysisErr) {
               console.error('[FaceDetection] Analysis error:', analysisErr);
             }
-          } else if (detectionCount > 0) {
+          } else if (currentCount > 0) {
              // Show scanning progress
              ctx.font = '16px Arial';
              ctx.fillStyle = 'white';
-             ctx.fillText(`Aligning face...`, 15, 40);
+             ctx.fillText(`Aligning face... ${currentCount}/20`, 15, 40);
           }
         } else {
           console.warn('[FaceDetection] Face detected but no keypoints available');
         }
       } else {
         setFaceDetected(false);
-        // Only reset detection count if we haven't detected a face for a while
-        if (detectionCount > 0) {
-          setDetectionCount(0);
-        }
+        // Don't reset detection count immediately - allow brief gaps in detection
+        // The count will only reset if we consistently fail to detect for many frames
+        // This prevents resetting due to brief detection gaps (1-2 frames)
       }
     } catch (err: unknown) {
       const error = err as Error;
-      console.error('[FaceDetection] Detection error:', err);
-      console.error('[FaceDetection] Error details:', {
-        message: error.message,
-        videoReady: video.readyState,
-        videoDimensions: `${video.videoWidth}x${video.videoHeight}`,
-        canvasDimensions: `${canvas.width}x${canvas.height}`,
-        detectorType: detectorRef.current ? 'loaded' : 'null'
-      });
+      // Only log errors occasionally to avoid spam
+      if (detectionCountRef.current % 30 === 0) {
+        console.error('[FaceDetection] Detection error:', err);
+        console.error('[FaceDetection] Error details:', {
+          message: error.message,
+          videoReady: video.readyState,
+          videoDimensions: `${video.videoWidth}x${video.videoHeight}`,
+          canvasDimensions: `${canvas.width}x${canvas.height}`,
+          detectorType: detectorRef.current ? 'loaded' : 'null'
+        });
+      }
       // Don't stop on single error, continue trying
     }
 
     // Continue the loop only if still analyzing and no mood has been detected
-    if (isAnalyzing && !detectedMood) {
+    // Always schedule next frame if still analyzing, even if detection failed
+    if (isAnalyzingRef.current && !detectedMoodRef.current) {
       animationRef.current = requestAnimationFrame(() => detectLoop());
+    } else if (!isAnalyzingRef.current) {
+      // Clean up if we stopped analyzing
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+        animationRef.current = 0;
+      }
     }
   };
 
@@ -630,16 +805,28 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
     });
 
     setIsAnalyzing(true);
+    isAnalyzingRef.current = true;
     setDetectedMood(null);
+    detectedMoodRef.current = null;
     setFaceDetected(false);
+    detectionCountRef.current = 0;
     setDetectionCount(0);
+    moodHistoryRef.current = []; // Reset mood history
     setError('');
+    
+    // Cancel any existing animation frame
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
+    }
+    
+    // Start the detection loop
     detectLoop();
 
     // Timeout after 30 seconds
     setTimeout(() => {
-      if (isAnalyzing && !detectedMood) {
+      if (isAnalyzingRef.current && !detectedMoodRef.current) {
         setIsAnalyzing(false);
+        isAnalyzingRef.current = false;
         setError('Detection timeout. Please ensure your face is clearly visible, well-lit, and try again.');
         console.warn('[FaceDetection] Detection timeout after 30 seconds');
       }
