@@ -314,18 +314,27 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       const browRatio = browDist / faceWidth;
 
       // Mouth corner position (for smile detection)
+      // In image coordinates, Y increases downward
+      // For a smile: corners curve UP (smaller Y) relative to center
+      // For a frown: corners curve DOWN (larger Y) relative to center
       const mouthCenterY = (mouthTop.y + mouthBottom.y) / 2;
       const leftMouthCorner = mouthLeft;
       const rightMouthCorner = mouthRight;
       const mouthCornerAvgY = (leftMouthCorner.y + rightMouthCorner.y) / 2;
-      const mouthCurvature = mouthCornerAvgY - mouthCenterY; // Positive = smile
+      // FIXED: Inverted calculation - positive = smile (corners above center), negative = frown (corners below center)
+      const mouthCurvature = mouthCenterY - mouthCornerAvgY; // Positive = smile, Negative = frown
 
+      // Normalize mouth curvature by face width for better comparison across face sizes
+      const normalizedMouthCurvature = mouthCurvature / faceWidth;
+      
       console.log('[FaceDetection] Metrics:', {
         smileRatio: smileRatio.toFixed(3),
         mouthOpen: mouthOpenRatio.toFixed(3),
         mouthCurvature: mouthCurvature.toFixed(3),
+        normalizedMouthCurvature: normalizedMouthCurvature.toFixed(3),
         eyeAspect: avgEAR.toFixed(3),
-        browRatio: browRatio.toFixed(3)
+        browRatio: browRatio.toFixed(3),
+        faceWidth: faceWidth.toFixed(1)
       });
 
       // Determine mood based on metrics with improved thresholds
@@ -347,16 +356,20 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       }
       
       // Stressed scoring: Frowning (negative mouth curvature), lowered brows, narrow eyes
-      // Use magnitude of negative curvature - more negative = more stressed
-      if (mouthCurvature < -8) {
+      // Use both absolute and normalized curvature for better accuracy
+      // Note: Negative curvature means corners below center (frown)
+      const normCurvature = Math.abs(normalizedMouthCurvature);
+      
+      // Check absolute curvature (works better for consistent face sizes)
+      if (mouthCurvature < -6 || normCurvature > 0.015) {
         stressedScore += 5; // Very strong frown
-      } else if (mouthCurvature < -5) {
+      } else if (mouthCurvature < -4 || normCurvature > 0.012) {
         stressedScore += 4; // Strong frown
-      } else if (mouthCurvature < -3) {
+      } else if (mouthCurvature < -2.5 || normCurvature > 0.008) {
         stressedScore += 3; // Clear frown
-      } else if (mouthCurvature < -1.5) {
+      } else if (mouthCurvature < -1.2 || normCurvature > 0.005) {
         stressedScore += 2; // Moderate frown
-      } else if (mouthCurvature < -0.5) {
+      } else if (mouthCurvature < -0.3 || normCurvature > 0.002) {
         stressedScore += 1; // Slight frown
       }
       
@@ -376,36 +389,45 @@ export const WebcamMoodDetector: React.FC<WebcamMoodDetectorProps> = ({ onMoodDe
       
       // Happy scoring: Wide smile (high smile ratio) AND raised mouth corners (positive curvature)
       // Both conditions must be met for a genuine smile
-      // Use magnitude of positive curvature - more positive = happier
-      if (mouthCurvature > 3.0 && smileRatio > 0.45) {
+      // Use both absolute and normalized curvature for better accuracy
+      // Note: Positive curvature means corners above center (smile)
+      const normCurvaturePos = normalizedMouthCurvature;
+      
+      // Check both absolute and normalized values
+      if ((mouthCurvature > 4.0 || normCurvaturePos > 0.015) && smileRatio > 0.45) {
         happyScore += 5; // Very big smile
-      } else if (mouthCurvature > 2.5 && smileRatio > 0.42) {
+      } else if ((mouthCurvature > 3.0 || normCurvaturePos > 0.012) && smileRatio > 0.42) {
         happyScore += 4; // Big smile
-      } else if (mouthCurvature > 2.0 && smileRatio > 0.40) {
+      } else if ((mouthCurvature > 2.2 || normCurvaturePos > 0.008) && smileRatio > 0.40) {
         happyScore += 3; // Clear smile
-      } else if (mouthCurvature > 1.5 && smileRatio > 0.38) {
+      } else if ((mouthCurvature > 1.5 || normCurvaturePos > 0.005) && smileRatio > 0.38) {
         happyScore += 2; // Moderate smile
-      } else if (mouthCurvature > 1.0 && smileRatio > 0.36) {
+      } else if ((mouthCurvature > 0.8 || normCurvaturePos > 0.002) && smileRatio > 0.36) {
         happyScore += 1; // Slight smile
       }
       
-      // Penalize happy if there's any frown (negative curvature)
-      if (mouthCurvature < 0) {
-        happyScore = Math.max(0, happyScore - 2); // Reduce happy score if frowning
+      // Strongly penalize happy if there's a clear frown (negative curvature)
+      if (mouthCurvature < -1.0 || normalizedMouthCurvature < -0.005) {
+        happyScore = 0; // No happy score if clearly frowning
+      } else if (mouthCurvature < 0) {
+        happyScore = Math.max(0, happyScore - 3); // Reduce happy score if slightly frowning
       }
       
       // Focused scoring: Normal eye aspect ratio, neutral mouth, normal brows
       // Neutral expression with open eyes
-      const isNeutralMouth = mouthCurvature >= -1.0 && mouthCurvature <= 1.5;
+      // Neutral mouth: small curvature (neither strong smile nor frown)
+      const isNeutralMouth = mouthCurvature >= -0.8 && mouthCurvature <= 1.2;
       const isNormalEyes = avgEAR >= 0.25 && avgEAR <= 0.32;
       const isNormalBrows = browRatio >= 0.16 && browRatio <= 0.22;
       
       if (isNeutralMouth && isNormalEyes && isNormalBrows) {
         focusedScore += 4; // Perfect neutral/focused
       } else if (isNeutralMouth && isNormalEyes) {
-        focusedScore += 2; // Mostly neutral
-      } else if (isNormalEyes && mouthCurvature >= -1.5 && mouthCurvature <= 2.0) {
-        focusedScore += 1; // Reasonably neutral
+        focusedScore += 3; // Mostly neutral
+      } else if (isNormalEyes && mouthCurvature >= -1.2 && mouthCurvature <= 1.5) {
+        focusedScore += 2; // Reasonably neutral
+      } else if (isNormalEyes) {
+        focusedScore += 1; // At least eyes are normal
       }
       
       // Determine mood based on highest score
