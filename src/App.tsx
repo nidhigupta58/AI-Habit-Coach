@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { HabitList } from './components/HabitList';
@@ -21,6 +21,7 @@ function AppContent() {
   const [activeTab, setActiveTab] = useState<'habits' | 'mood' | 'coach' | 'stats'>('habits');
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [dailyFocus, setDailyFocus] = useState<string | null>(null);
+  const userMenuRef = useRef<HTMLDivElement>(null);
 
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const savedTheme = localStorage.getItem('theme') as 'light' | 'dark' | null;
@@ -36,6 +37,30 @@ function AppContent() {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    const handleOutsideClick = (event: MouseEvent | TouchEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(event.target as Node)) {
+        setShowUserMenu(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowUserMenu(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleOutsideClick);
+    document.addEventListener('touchstart', handleOutsideClick);
+    document.addEventListener('keydown', handleEscape);
+
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('touchstart', handleOutsideClick);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, []);
 
   // Fetch Daily Focus
   useEffect(() => {
@@ -104,33 +129,36 @@ function AppContent() {
             </button>
 
             {/* User Menu */}
-            <div className="user-menu">
+            <div className="user-menu" ref={userMenuRef}>
               <button
                 className="user-button"
                 onClick={() => setShowUserMenu(!showUserMenu)}
+                aria-haspopup="menu"
+                aria-expanded={showUserMenu}
+                aria-label="Open user menu"
               >
                 <div className="user-avatar">
                   {user.email?.[0].toUpperCase() || 'U'}
                 </div>
-                <div style={{ textAlign: 'left' }}>
-                  <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>
+                <div className="user-identity">
+                  <div className="user-name">
                     {user.displayName || user.email?.split('@')[0]}
                   </div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                  <div className="user-email">
                     {user.email}
                   </div>
                 </div>
-                <ChevronDown size={16} style={{ color: 'var(--text-secondary)' }} />
+                <ChevronDown size={16} className={`user-chevron ${showUserMenu ? 'open' : ''}`} />
               </button>
 
               {/* Dropdown Menu */}
               {showUserMenu && (
                 <div className="dropdown-menu animate-slide-down">
                   <div className="dropdown-header">
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.25rem' }}>
+                    <div className="dropdown-label">
                       Signed in as
                     </div>
-                    <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>
+                    <div className="dropdown-email">
                       {user.email}
                     </div>
                   </div>
