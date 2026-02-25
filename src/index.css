@@ -262,6 +262,8 @@ body::before {
   justify-content: space-between;
   padding: var(--spacing-xl) 0;
   margin-bottom: var(--spacing-xl);
+  position: relative;
+  z-index: 30;
 }
 
 .app-logo {
@@ -333,6 +335,7 @@ body::before {
 /* User Menu */
 .user-menu {
   position: relative;
+  z-index: 40;
 }
 
 .user-button {
@@ -346,12 +349,50 @@ body::before {
   border: 1px solid var(--glass-border);
   cursor: pointer;
   transition: all var(--transition-base);
+  min-width: 250px;
+  max-width: min(75vw, 320px);
 }
 
 .user-button:hover {
   background: rgba(255, 255, 255, 0.1);
   transform: scale(1.02);
   box-shadow: var(--shadow-md);
+}
+
+.user-identity {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  min-width: 0;
+  flex: 1;
+}
+
+.user-name {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-email {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-chevron {
+  color: var(--text-secondary);
+  transition: transform var(--transition-fast), color var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.user-chevron.open {
+  transform: rotate(180deg);
+  color: var(--primary);
 }
 
 .user-avatar {
@@ -373,7 +414,7 @@ body::before {
   position: absolute;
   top: calc(100% + var(--spacing-sm));
   right: 0;
-  min-width: 250px;
+  width: min(86vw, 320px);
   background: var(--glass-bg);
   backdrop-filter: blur(24px);
   border: 1px solid var(--glass-border);
@@ -387,6 +428,21 @@ body::before {
 .dropdown-header {
   padding: var(--spacing-md) var(--spacing-lg);
   border-bottom: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dropdown-label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.dropdown-email {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.4;
+  word-break: break-all;
 }
 
 .dropdown-item {
@@ -404,13 +460,16 @@ body::before {
   font-weight: 500;
 }
 
+.dropdown-item + .dropdown-item {
+  border-top: 1px solid var(--glass-border);
+}
+
 .dropdown-item:hover {
   background: rgba(255, 255, 255, 0.1);
 }
 
 .dropdown-item.danger {
   color: var(--error);
-  border-top: 1px solid var(--glass-border);
 }
 
 /* Animations */
@@ -495,6 +554,8 @@ body::before {
   
   .app-header {
     padding: var(--spacing-lg) 0;
+    flex-wrap: wrap;
+    gap: var(--spacing-md);
   }
   
   .app-logo {
@@ -521,6 +582,17 @@ body::before {
   .btn {
     padding: 0.875rem 1.5rem;
     font-size: 0.9rem;
+  }
+
+  .user-button {
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .dropdown-menu {
+    right: 0;
+    left: auto;
   }
 }
 
